@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: gamma-bot
+    runtime: python
+    plan: free
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.6
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: MODELS
+        value: gemini-3.5-flash-lite,gemini-3.1-flash-lite
+      - key: HISTORY_TURNS
+        value: "8"
+      - key: COOLDOWN_SECONDS
+        value: "5"
+      - key: MAX_IMAGE_MB
+        value: "10"
