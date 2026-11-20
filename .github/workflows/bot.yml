@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "0 */6 * * *"
   workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Сколько секунд держать бота (по умолчанию 21000 = 5 ч 50 мин)"
+        required: false
+        default: "21000"
 
 concurrency:
   group: gamma-bot
@@ -26,6 +31,18 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Check token
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os, urllib.request, json
+          token = os.environ["TELEGRAM_BOT_TOKEN"].strip()
+          with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/getMe", timeout=20) as r:
+              data = json.load(r)
+          print("token ok:", data.get("ok"), "bot:", data.get("result", {}).get("username"))
+          PY
+
       - name: Run bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -35,4 +52,4 @@ jobs:
           COOLDOWN_SECONDS: "5"
           MAX_IMAGE_MB: "10"
         run: |
-          timeout --signal=INT 21000 python -u bot.py || true
+          timeout --signal=INT "${{ github.event.inputs.seconds || 21000 }}" python -u bot.py || true
