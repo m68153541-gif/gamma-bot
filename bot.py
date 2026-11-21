@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import html
 import io
 import json
@@ -7,6 +7,7 @@ import os
 import re
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 from aiogram import Bot, BaseMiddleware, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -127,7 +128,7 @@ last_request: dict[int, float] = {}
 history: dict[int, list[types.Content]] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.6.0"
+BOT_VERSION = "1.6.1"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -363,6 +364,35 @@ business_history: dict[str, dict[int, list[dict]]] = {}
 business_peer_names: dict[str, dict[int, str]] = {}
 BUSINESS_KEEP = 80
 BUSINESS_SIGNATURE = "\n\n🤖 нейросеть"
+STATE_FILE = Path("business_state.json")
+
+
+def load_state() -> None:
+    try:
+        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    for cid, info in (data.get("connections") or {}).items():
+        if isinstance(info, dict):
+            business_connections[cid] = info
+    for cid, peers in (data.get("peers") or {}).items():
+        try:
+            business_peer_names[cid] = {int(k): v for k, v in peers.items()}
+        except Exception:
+            continue
+    log.info("Состояние подхвачено: подключений %d", len(business_connections))
+
+
+def save_state() -> None:
+    data = {
+        "connections": business_connections,
+        "peers": {cid: {str(k): v for k, v in m.items()} for cid, m in business_peer_names.items()},
+    }
+    try:
+        STATE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        log.warning("Не удалось сохранить состояние подключений", exc_info=True)
+
 
 PROFILE_INSTRUCTION = (
     "Ты аналитик переписки. По фрагменту диалога опиши по-русски, по пунктам: "
@@ -395,6 +425,25 @@ async def on_business_connection(connection: BusinessConnection) -> None:
         rights.get("can_read_messages"),
         connection.can_reply,
     )
+    save_state()
+
+
+async def refresh_connection(bot: Bot, cid: str) -> None:
+    try:
+        connection = await bot.get_business_connection(business_connection_id=cid)
+    except Exception as exc:
+        log.warning("Не удалось обновить подключение %s: %s", cid, type(exc).__name__)
+        return
+    rights = connection.rights.model_dump() if connection.rights else {}
+    business_connections[cid] = {
+        "user_id": connection.user.id,
+        "username": connection.user.username or "",
+        "name": connection.user.full_name,
+        "enabled": connection.is_enabled,
+        "can_reply": connection.can_reply,
+        "rights": rights,
+    }
+    save_state()
 
 
 async def remember_business_message(message: Message) -> None:
@@ -404,6 +453,19 @@ async def remember_business_message(message: Message) -> None:
     text = (message.text or message.caption or "").strip()
     if not text:
         return
+
+    if cid not in business_connections:
+        business_connections[cid] = {
+            "user_id": None,
+            "username": "",
+            "name": "подключённый аккаунт",
+            "enabled": True,
+            "can_reply": True,
+            "rights": {},
+        }
+        log.info("Подхватил подключение %s из входящего сообщения", cid)
+        save_state()
+
     info = business_connections.get(cid) or {}
     owner_id = info.get("user_id")
     from_me = message.from_user is not None and owner_id is not None and message.from_user.id == owner_id
@@ -422,6 +484,7 @@ async def remember_business_message(message: Message) -> None:
     username = message.chat.username or (message.from_user.username if message.from_user else None)
     if username:
         business_peer_names.setdefault(cid, {})[message.chat.id] = username
+        save_state()
 
 
 @dp.business_message()
@@ -444,13 +507,16 @@ def active_connection() -> tuple[str, dict] | None:
 def business_status_text() -> str:
     if not business_connections:
         return (
-            "🔌 Бот пока не подключён к аккаунту.\n\n"
-            "Как подключить:\n"
+            "🔌 Подключения не вижу.\n\n"
+            "Telegram присылает событие о подключении один раз — если оно случилось, "
+            "пока бот перезапускался, оно потерялось. Лечится так:\n\n"
             "1️⃣ Нужен Telegram Premium — бизнес-боты работают только с ним.\n"
-            "2️⃣ Настройки → Telegram Business → Чат-боты → добавить @gamma_zyzabot.\n"
-            "3️⃣ Разреши чтение сообщений и ответы, сохрани.\n"
-            "4️⃣ Вернись сюда и снова отправь /adm.\n\n"
-            "После подключения заработают команды:\n"
+            "2️⃣ Настройки → Telegram Business → Чат-боты → убрать @gamma_zyzabot из списка "
+            "и добавить заново, включив чтение личных чатов и ответы.\n"
+            "3️⃣ Снова отправь /adm — подключение подхватится.\n\n"
+            "Если не хочется трогать настройки: пусть кто-нибудь напишет тебе в личку — "
+            "из входящего сообщения я тоже узнаю подключение.\n\n"
+            "Дальше работают команды:\n"
             "• «напиши @username «текст»» — отправлю от твоего лица с подписью «нейросеть»\n"
             "• «расскажи о @username» — разберу переписку и тон общения"
         )
@@ -471,7 +537,7 @@ def business_status_text() -> str:
     lines += [
         "",
         "Команды: «напиши @username «текст»» и «расскажи о @username».",
-        "Переписка хранится только в памяти процесса — после перезапуска история начинается заново.",
+        "Подключение сохраняется между перезапусками, переписка — только в памяти процесса.",
     ]
     return "\n".join(lines)
 
@@ -481,6 +547,8 @@ async def cmd_adm(message: Message) -> None:
     if not is_admin(message):
         await message.answer("Эта команда только для администратора.")
         return
+    for cid in list(business_connections):
+        await refresh_connection(message.bot, cid)
     await message.answer(
         business_status_text(),
         reply_markup=InlineKeyboardMarkup(
@@ -917,6 +985,7 @@ async def start_health_server() -> None:
 
 async def main() -> None:
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    load_state()
     log.info("Бот запущен, модели: %s", ", ".join(MODELS))
     try:
         await start_health_server()

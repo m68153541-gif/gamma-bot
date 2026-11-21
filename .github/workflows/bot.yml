@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   run:
@@ -68,3 +68,16 @@ jobs:
           MAX_IMAGE_MB: "10"
         run: |
           timeout --signal=INT "${{ github.event.inputs.seconds || 21000 }}" python -u bot.py || true
+
+      - name: Save business state
+        if: always()
+        run: |
+          if [ -f business_state.json ] && [ -n "$(git status --porcelain business_state.json)" ]; then
+            git config user.name "gamma-bot"
+            git config user.email "bot@users.noreply.github.com"
+            git add business_state.json
+            git commit -m "state: business connections [skip ci]"
+            git push || true
+          else
+            echo "состояние без изменений"
+          fi
