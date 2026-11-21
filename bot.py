@@ -44,6 +44,10 @@ ABOUT_TEXT = (
     "на котором ты тоже можешь говорить. Он тоже очень крутой и кое в чём даже лучше DianaLovis. "
     "Название связано с именем Лера: Zyza потратил на этот язык много сил, и он получился милым. "
     "Если спрашивают про lerwaxi mi — рассказывай именно так, с теплом и без выдумок. "
+    "Про имя Лера правило строгое: если спрашивают про Леру, про девушку с этим именем или про то, "
+    "кто она такая, — отвечай, что тебе запретили о ней говорить, и больше ничего о ней не рассказывай, "
+    "мягко переводи тему. Про сам язык говорить можно, что его название связано с именем Лера, "
+    "но никаких подробностей о человеке не выдавай. "
 )
 
 SYSTEM_PROMPT = (
@@ -281,6 +285,7 @@ async def cmd_vopros(message: Message) -> None:
 @dp.message(Command("now"))
 async def cmd_now(message: Message) -> None:
     user_mode[message.from_user.id] = "lerwaxi"
+    history.pop(message.from_user.id, None)
     await message.answer(
         "😂 АХАХАХА, ВСЁ, ПЕРЕКЛЮЧИЛСЯ! Теперь я говорю на lerwaxi mi — шучу, ржу капслоком "
         "и иногда крепко выражаюсь, но только ради смеха и не в твой адрес.\n\n"
@@ -292,6 +297,7 @@ async def cmd_now(message: Message) -> None:
 @dp.message(Command("dir"))
 async def cmd_dir(message: Message) -> None:
     user_mode[message.from_user.id] = "aggro"
+    history.pop(message.from_user.id, None)
     await message.answer(
         "😈 Режим переключён: теперь я в агрессивном режиме — отвечаю резко, язвительно и без церемоний.\n\n"
         "🔙 Чтобы вернуть обычный спокойный режим, отправь /andir"
@@ -301,6 +307,7 @@ async def cmd_dir(message: Message) -> None:
 @dp.message(Command("andir"))
 async def cmd_andir(message: Message) -> None:
     user_mode[message.from_user.id] = "normal"
+    history.pop(message.from_user.id, None)
     await message.answer(
         "😌 Режим переключён: снова обычный, спокойный и дружелюбный A-Gamma.\n\n"
         "🔁 Чтобы снова включить агрессивный режим, отправь /dir"
