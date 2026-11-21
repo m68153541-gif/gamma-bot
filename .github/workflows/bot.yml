@@ -67,19 +67,19 @@ jobs:
           HISTORY_TURNS: "8"
           COOLDOWN_SECONDS: "5"
           MAX_IMAGE_MB: "10"
-          SYNC_MINUTES: "10"
+          DB_SYNC_SECONDS: "30"
         run: |
           timeout --signal=INT "${{ github.event.inputs.seconds || 21000 }}" python -u bot.py || true
 
       - name: Save database snapshot
         if: always()
+        env:
+          DB_KEY: ${{ secrets.DB_KEY }}
         run: |
-          if [ -f data/bot.db.enc ] && [ -n "$(git status --porcelain data/bot.db.enc)" ]; then
-            git config user.name "gamma-bot"
-            git config user.email "bot@users.noreply.github.com"
-            git add data/bot.db.enc
-            git commit -m "state: база бота [skip ci]"
-            git push || true
-          else
-            echo "снимок базы без изменений"
-          fi
+          git config user.name "gamma-bot"
+          git config user.email "bot@users.noreply.github.com"
+          python - <<'PY'
+          import sync
+          if not sync.push():
+              print("снимок не отправлен")
+          PY

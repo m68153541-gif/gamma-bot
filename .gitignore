@@ -11,3 +11,4 @@ data/bot.db-journal
 data/bot.db-wal
 data/bot.db-shm
 business_state.json
+data/bot.db.enc

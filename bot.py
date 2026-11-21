@@ -40,7 +40,6 @@ MODELS = [
 ]
 
 COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "5"))
-SYNC_MINUTES = int(os.getenv("SYNC_MINUTES", "10"))
 MAX_IMAGE_MB = int(os.getenv("MAX_IMAGE_MB", "10"))
 HISTORY_TURNS = int(os.getenv("HISTORY_TURNS", "8"))
 TG_LIMIT = 4000
@@ -130,7 +129,7 @@ dp = Dispatcher()
 last_request: dict[int, float] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.7.0"
+BOT_VERSION = "1.8.0"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -482,7 +481,7 @@ def business_status_text() -> str:
             "• «расскажи о @username» — разберу переписку и тон общения"
         )
 
-    lines = ["🔌 Подключение к аккаунту:"]
+    lines = ["✅ Бот подключён к аккаунту — можно работать.", ""]
     for cid, info in connections.items():
         rights = info.get("rights") or {}
         state = "активно ✅" if info.get("enabled") else "отключено ⛔"
@@ -497,8 +496,13 @@ def business_status_text() -> str:
         ]
     lines += [
         "",
-        "Команды: «напиши @username «текст»» и «расскажи о @username».",
-        "Подключение и переписка хранятся в базе и переживают перезапуски.",
+        "Что можно спросить:",
+        "• «напиши @username «текст»» — отправлю от твоего лица с подписью «🤖 нейросеть»",
+        "• «расскажи о @username» — кто он и как к тебе относится",
+        "• «расскажи о @a и @b» — сравню ваши чаты и скажу, кто ближе",
+        "• «расскажи обо мне» — личность, мои возможности и карта отношений",
+        "",
+        "База обновляется каждые 30 секунд и переживает перезапуски.",
     ]
     return "\n".join(lines)
 
@@ -536,26 +540,51 @@ SELF_PROFILE_INSTRUCTION = (
 )
 
 
+SELF_PROFILE_WITH_MAP = (
+    "Ты — A-Gamma, личный ассистент владельца аккаунта. По перепискам сделай разбор:\n"
+    "1) что за личность владелец: характер, стиль общения, интересы, на что способен, чего избегает;\n"
+    "2) что ты умеешь для него как ассистент — коротко, по делу;\n"
+    "3) карта отношений: по каждому @юзернейму — кто он (друг, приятель, коллега, родня), "
+    "кто к владельцу тёпло расположен или влюблён, в кого, похоже, влюблён сам владелец, "
+    "кто держится холодно или враждебно, кто потенциально опасен (давит, манипулирует, угрожает) — "
+    "с обоснованием из реплик;\n"
+    "4) что владельцу стоит сделать по этим отношениям.\n"
+    "Догадки помечай словом «похоже», фактов не выдумывай. Списком, живо, с эмодзи."
+)
+
+
 async def self_profile(message: Message) -> bool:
     user_id = message.from_user.id
     total = store.user_count_message(user_id)
-    if total < 2:
+    rows = store.archive(user_id, 200)
+    digest = "\n".join(
+        ("Я: " if role == "model" else "Пользователь: ") + text.replace("\n", " ") for role, text in rows
+    )[-12000:]
+    peers = relationship_blocks() if is_admin(message) else []
+
+    if total < 2 and not peers:
         await message.answer(
             "Я пока о тебе почти ничего не знаю — напиши пару сообщений, и я начну запоминать."
         )
         return True
 
-    rows = store.archive(user_id, 200)
-    digest = "\n".join(
-        ("Я: " if role == "model" else "Пользователь: ") + text.replace("\n", " ") for role, text in rows
-    )[-12000:]
+    if peers:
+        instruction = SELF_PROFILE_WITH_MAP
+        payload = (
+            f"Переписка со мной:\n\n{digest or '(почти нет)'}\n\n"
+            "Переписки с другими людьми:\n\n" + "\n\n".join(peers)[-16000:]
+        )
+    else:
+        instruction = SELF_PROFILE_INSTRUCTION
+        payload = f"Переписка:\n\n{digest}"
+
     thinking = await message.reply("🧠 Собираю, что я о тебе знаю…")
     try:
         text = await asyncio.to_thread(
             ask_model,
-            [types.Part.from_text(text=f"Переписка:\n\n{digest}")],
+            [types.Part.from_text(text=payload)],
             [],
-            SELF_PROFILE_INSTRUCTION,
+            instruction,
         )
     except Exception:
         log.exception("Ошибка сборки профиля")
@@ -661,11 +690,81 @@ async def business_profile(message: Message, username: str) -> bool:
     return True
 
 
+def peer_digest(cid: str, chat_id: int, limit: int = 40) -> str:
+    rows = store.peer_messages(cid, chat_id, limit)
+    return "\n".join(
+        ("Я: " if r["role"] == "me" else "Собеседник: ") + r["text"].replace("\n", " ") for r in rows
+    )
+
+
+PAIR_INSTRUCTION = (
+    "Ты разбираешь личную переписку владельца аккаунта с несколькими людьми. По фрагментам чатов "
+    "сравни собеседников между собой: чем они отличаются по манере общения, кто к тебе теплее, "
+    "кто суше, где есть напряжение, кто ждёт больше внимания. "
+    "Дай: 1) короткий портрет каждого; 2) как каждый относится к владельцу — как к другу, коллеге, "
+    "возлюбленному или врагу, с обоснованием из реплик; 3) кто ближе к тебе и почему; "
+    "4) с кем стоит поговорить начистоту. Это только догадки по переписке — так и пиши: «похоже»."
+)
+
+
+async def pair_profile(message: Message, names: list[str]) -> bool:
+    if active_connection() is None:
+        await message.answer("Сначала подключи бота к аккаунту — инструкция в /adm.")
+        return True
+
+    blocks, found = [], []
+    for name in names:
+        target = find_peer(name)
+        if target is None:
+            continue
+        digest = peer_digest(target[0], target[1])
+        if digest:
+            blocks.append(f"=== @{name} ===\n{digest}")
+            found.append(name)
+
+    if not blocks:
+        await message.answer("Не нашёл переписку с этими людьми в базе.")
+        return True
+
+    parts = [types.Part.from_text(text="\n\n".join(blocks)[-14000:])]
+    thinking = await message.reply(f"🧠 Сравниваю {', '.join('@' + n for n in found)}…")
+    try:
+        text = await asyncio.to_thread(ask_model, parts, [], PAIR_INSTRUCTION)
+    except Exception:
+        log.exception("Ошибка сравнения переписок")
+        await thinking.delete()
+        await message.answer("Не получилось сравнить, попробуй ещё раз чуть позже.")
+        return True
+
+    await thinking.delete()
+    for chunk in split_text(text):
+        await message.reply(to_html(chunk), parse_mode="HTML")
+    return True
+
+
+def relationship_blocks(limit_peers: int = 8, per_peer: int = 30) -> list[str]:
+    blocks: list[str] = []
+    for cid in store.connections():
+        peers = store.peers(cid)
+        ranked = sorted(
+            peers.items(),
+            key=lambda item: len(store.peer_messages(cid, item[0], 500)),
+            reverse=True,
+        )[:limit_peers]
+        for chat_id, info in ranked:
+            digest = peer_digest(cid, chat_id, per_peer)
+            if digest:
+                who = info.get("username") or info.get("name") or str(chat_id)
+                blocks.append(f"=== @{who} ===\n{digest}")
+    return blocks
+
+
 async def try_business_intent(message: Message, text: str) -> bool:
     if not is_admin(message):
         return False
 
     low = text.lower()
+    names = re.findall(r"@([A-Za-z0-9_]{4,64})", text)
     username_match = re.search(r"@([A-Za-z0-9_]{4,64})", text)
     quote_match = re.search(r"[«\"“„']([^«»\"“”„']{1,1000})[»\"“”„']", text, re.S)
     wants_send = re.search(r"\b(напиши|написать|отправь|отправить|скажи|передай)\b", low)
@@ -674,6 +773,9 @@ async def try_business_intent(message: Message, text: str) -> bool:
     if wants_send and quote_match:
         username = username_match.group(1) if username_match else None
         return await business_send(message, username, quote_match.group(1).strip())
+
+    if wants_profile and len(names) >= 2:
+        return await pair_profile(message, names[:3])
 
     if username_match and (wants_profile or low.strip() == f"@{username_match.group(1).lower()}"):
         return await business_profile(message, username_match.group(1))
@@ -1014,7 +1116,7 @@ async def start_health_server() -> None:
 
 async def sync_loop() -> None:
     while True:
-        await asyncio.sleep(SYNC_MINUTES * 60)
+        await asyncio.sleep(max(10, sync.SYNC_SECONDS))
         try:
             await asyncio.to_thread(sync.push)
         except Exception:

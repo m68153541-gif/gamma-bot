@@ -1,8 +1,9 @@
-"""Шифрованный снимок базы и синхронизация с репозиторием.
+"""Постоянная база бота: шифрованный снимок в отдельной ветке репозитория.
 
-Репозиторий публичный, поэтому открытая база туда не попадает: перед отправкой
-SQLite шифруется ключом из переменной окружения DB_KEY (Fernet).
-Если ключа нет, синхронизация просто не включается — бот работает локально.
+Открытая SQLite в репозиторий не попадает — перед отправкой файл шифруется
+ключом DB_KEY (Fernet). Снимок живёт в ветке `state`, которая каждый раз
+перезаписывается одним коммитом, поэтому история не растёт, а данные
+сохраняются без потерь (каждые DB_SYNC_SECONDS секунд).
 """
 
 import logging
@@ -16,7 +17,10 @@ import store
 
 log = logging.getLogger("gamma.sync")
 
-SNAPSHOT = Path(os.getenv("DB_SNAPSHOT", "data/bot.db.enc"))
+STATE_BRANCH = os.getenv("DB_BRANCH", "state")
+STATE_NAME = "bot.db.enc"
+SNAPSHOT = Path(os.getenv("DB_SNAPSHOT", f"data/{STATE_NAME}"))
+SYNC_SECONDS = int(os.getenv("DB_SYNC_SECONDS", "30"))
 
 
 def _fernet() -> Fernet | None:
@@ -30,20 +34,52 @@ def _fernet() -> Fernet | None:
         return None
 
 
+def _run(args: list[str], text_input: str | bytes | None = None, text: bool = True):
+    try:
+        return subprocess.run(
+            ["git", *args],
+            capture_output=True,
+            text=text,
+            input=text_input,
+            timeout=120,
+        )
+    except Exception as exc:
+        log.warning("git %s не выполнился: %s", args[0], type(exc).__name__)
+        return None
+
+
+def _git(*args: str) -> tuple[int, str]:
+    proc = _run(list(args))
+    if proc is None:
+        return 1, "git недоступен"
+    out = proc.stdout if isinstance(proc.stdout, str) else ""
+    return proc.returncode, (out + (proc.stderr or "")).strip()
+
+
 def restore() -> bool:
     f = _fernet()
-    if f is None or not SNAPSHOT.exists():
+    if f is None:
         return False
     if store.DB_PATH.exists():
         return False
+
+    rc, _ = _git("fetch", "--depth=1", "origin", STATE_BRANCH)
+    if rc != 0:
+        return False
+
+    proc = _run(["show", f"origin/{STATE_BRANCH}:{STATE_NAME}"], text=False)
+    if proc is None or proc.returncode != 0 or not isinstance(proc.stdout, bytes):
+        return False
+
     try:
-        data = f.decrypt(SNAPSHOT.read_bytes())
+        data = f.decrypt(proc.stdout)
     except InvalidToken:
         log.error("Снимок базы не расшифровался: ключ не тот")
         return False
+
     store.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     store.DB_PATH.write_bytes(data)
-    log.info("База восстановлена из снимка: %d байт", len(data))
+    log.info("База восстановлена из ветки %s: %d байт", STATE_BRANCH, len(data))
     return True
 
 
@@ -57,33 +93,32 @@ def dump() -> bool:
     return True
 
 
-def _git(*args: str) -> tuple[int, str]:
-    try:
-        proc = subprocess.run(["git", *args], capture_output=True, text=True, timeout=120)
-    except Exception as exc:
-        log.warning("git %s не выполнился: %s", args[0], type(exc).__name__)
-        return 1, str(exc)
-    return proc.returncode, (proc.stdout + proc.stderr).strip()
-
-
 def push() -> bool:
     if not dump():
         return False
 
     _git("config", "user.name", "gamma-bot")
     _git("config", "user.email", "bot@users.noreply.github.com")
-    _git("add", str(SNAPSHOT))
-    rc, out = _git("status", "--porcelain", str(SNAPSHOT))
-    if rc != 0 or not out:
-        return True
 
-    _git("pull", "--rebase", "--autostash", "--quiet")
-    rc, _ = _git("commit", "--quiet", "-m", "state: база бота [skip ci]")
-    if rc != 0:
+    blob = _run(["hash-object", "-w", str(SNAPSHOT)])
+    if blob is None or blob.returncode != 0:
+        log.warning("git hash-object не сработал")
         return False
-    rc, out = _git("push", "--quiet")
-    if rc != 0:
-        log.warning("Не удалось отправить базу в репозиторий: %s", out[:200])
+
+    entry = f"100644 blob {blob.stdout.strip()}\t{STATE_NAME}\n".encode()
+    tree = _run(["mktree"], text_input=entry, text=False)
+    if tree is None or tree.returncode != 0 or not isinstance(tree.stdout, bytes):
+        log.warning("git mktree не сработал")
         return False
-    log.info("База сохранена в репозитории")
+
+    commit = _run(["commit-tree", tree.stdout.decode().strip(), "-m", "state: база бота"])
+    if commit is None or commit.returncode != 0:
+        log.warning("git commit-tree не сработал")
+        return False
+
+    rc, out = _git("push", "--force", "origin", f"{commit.stdout.strip()}:refs/heads/{STATE_BRANCH}")
+    if rc != 0:
+        log.warning("Не удалось отправить базу: %s", out[:200])
+        return False
+    log.info("База сохранена в ветке %s", STATE_BRANCH)
     return True
