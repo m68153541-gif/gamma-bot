@@ -130,7 +130,7 @@ dp = Dispatcher()
 last_request: dict[int, float] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.14.0"
+BOT_VERSION = "1.14.1"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -665,7 +665,8 @@ async def self_profile(message: Message) -> bool:
 
     if total < 2 and not peers:
         await message.answer(
-            "Я пока о тебе почти ничего не знаю — напиши пару сообщений, и я начну запоминать."
+            "Об этом аккаунте у меня почти ничего нет: подключения к нему нет, "
+            "и переписки со мной тоже мало. Подключи бота через /adm или просто пообщайся со мной."
         )
         return True
 
@@ -940,7 +941,10 @@ def blocks_for_connections(cids, limit_peers: int = 8, per_peer: int = 30) -> li
 
 
 def relationship_blocks(user_id: int, limit_peers: int = 8, per_peer: int = 30) -> list[str]:
-    return blocks_for_connections(list(store.connections()), limit_peers, per_peer)
+    own = connections_for(user_id)
+    if not own:
+        return []
+    return blocks_for_connections(list(own), limit_peers, per_peer)
 
 
 async def try_business_intent(message: Message, text: str) -> bool:
