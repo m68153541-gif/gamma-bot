@@ -6,13 +6,15 @@ import logging
 import os
 import re
 import time
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 
 from aiogram import Bot, BaseMiddleware, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatAction
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message
+from aiogram.types import BufferedInputFile, Message
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -413,9 +415,10 @@ async def cmd_help(message: Message) -> None:
         "1. 💬 Просто общайся — отвечу на любой вопрос и поддержу разговор.\n"
         "2. 📸 Отправь фото задания — решу по шагам и дам ответ.\n"
         "3. 📎 Фото как файл (без сжатия) — качество распознавания выше.\n"
-        "4. 🧹 /reset — очистить память диалога и начать заново.\n"
-        "5. 😈 /dir — агрессивный режим, 🔙 /andir — вернуть спокойный.\n"
-        "6. 📖 /vopros — расскажу о себе.\n\n"
+        "4. 🎨 «Нарисуй …» или /img описание — пришлю картинку.\n"
+        "5. 🧹 /reset — очистить память диалога и начать заново.\n"
+        "6. 😈 /dir — агрессивный режим, 🔙 /andir — вернуть спокойный.\n"
+        "7. 📖 /vopros — расскажу о себе.\n\n"
         f"Я помню последние {HISTORY_TURNS} сообщений. "
         f"Ограничения: не больше {MAX_IMAGE_MB} МБ на изображение, "
         f"один запрос в {COOLDOWN_SECONDS} сек."
@@ -501,6 +504,48 @@ async def cmd_tech(message: Message) -> None:
     )
 
 
+IMAGE_TRIGGERS = re.compile(
+    r"(?i)^\s*(?:нарисуй|нарисовать|сгенерируй|сгенерировать|создай картинку|"
+    r"изобрази|покажи картинку|draw|generate image)\b[\s,:—-]*(.+)"
+)
+
+
+def generate_image(prompt: str) -> bytes:
+    url = (
+        "https://image.pollinations.ai/prompt/"
+        + urllib.parse.quote(prompt)
+        + "?width=1024&height=1024&nologo=true&model=flux"
+    )
+    with urllib.request.urlopen(url, timeout=90) as response:
+        return response.read()
+
+
+async def send_image(message: Message, prompt: str) -> None:
+    note = await message.reply("🎨 Рисую…")
+    try:
+        data = await asyncio.to_thread(generate_image, prompt)
+    except Exception as exc:
+        log.exception("Ошибка генерации картинки")
+        await note.delete()
+        await message.reply(f"😔 Не получилось нарисовать. Причина: {type(exc).__name__}")
+        return
+
+    await note.delete()
+    await message.reply_photo(
+        BufferedInputFile(data, filename="gamma.png"),
+        caption=prompt[:200],
+    )
+
+
+@dp.message(Command("img"))
+async def cmd_img(message: Message) -> None:
+    prompt = (message.text or "").partition(" ")[2].strip()
+    if not prompt:
+        await message.answer("Напиши так: /img кот в шляпе, акварель")
+        return
+    await send_image(message, prompt)
+
+
 @dp.message(F.text)
 async def on_text(message: Message) -> None:
     text = message.text.strip()
@@ -508,6 +553,11 @@ async def on_text(message: Message) -> None:
         return
     if len(text) > 6000:
         await message.reply("Слишком длинное сообщение, сократи, пожалуйста, до 6000 символов.")
+        return
+
+    image_request = IMAGE_TRIGGERS.match(text)
+    if image_request:
+        await send_image(message, image_request.group(1).strip())
         return
 
     if is_admin(message):
