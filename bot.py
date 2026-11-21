@@ -130,7 +130,7 @@ dp = Dispatcher()
 last_request: dict[int, float] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.11.0"
+BOT_VERSION = "1.12.0"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -487,6 +487,10 @@ def has_owner_access(user_id: int) -> bool:
 
 
 def connections_for(user_id: int) -> dict[str, dict]:
+    shared = os.getenv("SHARED_DB", "1") != "0"
+    if shared:
+        return store.connections()
+
     result: dict[str, dict] = {}
     privileged = has_owner_access(user_id)
     for cid, info in store.connections().items():
@@ -700,6 +704,13 @@ async def business_send(message: Message, username: str | None, text: str) -> bo
     conn = active_connection(message.from_user.id)
     if conn is None:
         await message.answer("Сначала подключи бота к аккаунту — инструкция в /adm.")
+        return True
+    owner = connection_owner(conn[1])
+    if owner is not None and owner != message.from_user.id and not has_owner_access(message.from_user.id):
+        await message.answer(
+            "Переписку показать могу, а писать от чужого имени — нет. "
+            "Отправлять сообщения можно только с аккаунта, к которому подключён бот."
+        )
         return True
     if not username:
         await message.answer("Укажи получателя: «напиши @username «текст сообщения»».")
