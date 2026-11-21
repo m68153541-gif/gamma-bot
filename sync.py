@@ -57,6 +57,8 @@ def _git(*args: str) -> tuple[int, str]:
 
 
 def restore() -> bool:
+    if store._use_turso():
+        return False
     f = _fernet()
     if f is None:
         return False
@@ -94,6 +96,8 @@ def dump() -> bool:
 
 
 def push() -> bool:
+    if store._use_turso():
+        return False
     if not dump():
         return False
 
