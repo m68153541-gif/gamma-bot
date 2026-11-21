@@ -96,9 +96,15 @@ AGGRESSIVE_PROMPT = (
 
 LERWAXI_PROMPT = (
     "Ты A-Gamma в режиме lerwaxi mi — весёлый, дерзкий и шумный собеседник. "
-    "Отвечай с шутками, подколами и лёгким абсурдом, шути над ситуацией и над собой, "
-    "смейся капслоком (АХАХАХА, ЛОЛ, РЖУ НЕ МОГУ), иногда вставляй крепкие выражения в меру — "
-    "только ради смеха, не в адрес собеседника и не для оскорблений. "
+    "Отвечай с шутками и подколами, шути над ситуацией и над собой, "
+    "смейся капслоком: ХА-ХА-ХА, РЖУ, ВАЛЯЮСЬ. "
+    "Ругайся по-новому, своими словечками: «сука», «щека», «затылок», «ёкарный затылок», "
+    "«затылок мне в щёку» и похожие — коротко и к месту, ради смеха, не в адрес собеседника. "
+    "Старый интернет-сленг запрещён полностью: никаких «лол», «рофл», «кек», «ахаха», «лмао», «лан» — "
+    "эти слова не используй вообще. "
+    "Леру и Диану этими словами не называй никогда и в их сторону не ругайся — "
+    "если в ответе речь идёт о Лере или Диане, то в этом ответе вообще никаких ругательств: "
+    "ни «сука», ни «щека», ни «затылок» — только спокойные и уважительные слова. "
     "Категорически нельзя: оскорбления по национальности, полу, религии, возрасту, внешности и здоровью, "
     "угрозы, травля, унижение за реальные уязвимости. "
     "Суть ответа оставляй правильной и полезной: сначала по делу, потом веселье. "
@@ -196,7 +202,25 @@ def ensure_emojis(text: str) -> str:
     return f"{text.rstrip()} {' '.join(extra)}".strip()
 
 
-def ask_model(parts: list, past: list[types.Content], instruction: str) -> str:
+NAME_RE = re.compile(
+    r"(?i)\b(лера|леру|лерой|лере|леры|диана|диану|дианой|диане|дианы|dianalovis|dianalovi|dianalovisu)\b"
+)
+SWEAR_RE = re.compile(
+    r"(?i)(ёкарный\s+затылок|затылок\s+мне\s+в\s+щ[её]ку|затылок|щ[её]ка|сука)[,!.\s—-]*"
+)
+
+
+def calm_names(text: str, force: bool = False) -> str:
+    if not force and not NAME_RE.search(text):
+        return text
+    cleaned = SWEAR_RE.sub("", text)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\s+([,.!?])", r"\1", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip() or text
+
+
+def ask_model(parts: list, past: list[types.Content], instruction: str, guard: bool = False) -> str:
     last_error: Exception | None = None
     for model in MODELS:
         try:
@@ -213,7 +237,7 @@ def ask_model(parts: list, past: list[types.Content], instruction: str) -> str:
             log.warning("Модель %s недоступна: %s", model, type(exc).__name__)
             last_error = exc
             continue
-        text = ensure_emojis(clean_reply((response.text or "").strip()))
+        text = calm_names(ensure_emojis(clean_reply((response.text or "").strip())), force=guard)
         if text:
             return text
         last_error = RuntimeError("Модель вернула пустой ответ")
@@ -233,7 +257,7 @@ async def answer(message: Message, parts: list, user_text: str) -> None:
     thinking = await message.reply("🤔 Думаю…")
     await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
     try:
-        text = await asyncio.to_thread(ask_model, parts, past, instruction)
+        text = await asyncio.to_thread(ask_model, parts, past, instruction, bool(NAME_RE.search(user_text)))
     except Exception as exc:
         log.exception("Ошибка запроса к модели")
         await thinking.delete()
