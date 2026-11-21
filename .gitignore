@@ -5,3 +5,9 @@ __pycache__/
 bot.log
 bot.err.log
 users.json
+
+data/bot.db
+data/bot.db-journal
+data/bot.db-wal
+data/bot.db-shm
+business_state.json

@@ -25,6 +25,9 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
+import store
+import sync
+
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -37,6 +40,7 @@ MODELS = [
 ]
 
 COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "5"))
+SYNC_MINUTES = int(os.getenv("SYNC_MINUTES", "10"))
 MAX_IMAGE_MB = int(os.getenv("MAX_IMAGE_MB", "10"))
 HISTORY_TURNS = int(os.getenv("HISTORY_TURNS", "8"))
 TG_LIMIT = 4000
@@ -106,7 +110,6 @@ SYSTEM_PROMPTS = {
     "normal": SYSTEM_PROMPT,
     "aggro": AGGRESSIVE_PROMPT,
 }
-user_mode: dict[int, str] = {}
 
 if not TELEGRAM_BOT_TOKEN:
     raise SystemExit("Не задан TELEGRAM_BOT_TOKEN в .env")
@@ -125,17 +128,15 @@ client = genai.Client(
 )
 dp = Dispatcher()
 last_request: dict[int, float] = {}
-history: dict[int, list[types.Content]] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.6.1"
+BOT_VERSION = "1.7.0"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
 _gate_warned = False
 STARTED_AT = datetime.now(timezone.utc)
 USERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "users.json")
-users: dict[str, dict] = {}
 
 
 def load_users() -> None:
@@ -143,46 +144,37 @@ def load_users() -> None:
         with open(USERS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict):
-            users.update({str(k): v for k, v in data.items()})
-        log.info("Загружено пользователей: %s", len(users))
+            for key, row in data.items():
+                try:
+                    store.touch_user(
+                        int(key),
+                        row.get("chat_id"),
+                        row.get("username", ""),
+                        row.get("first_name", ""),
+                        row.get("last_name", ""),
+                    )
+                except Exception:
+                    continue
+        log.info("Пользователей в базе: %s", len(store.users()))
     except FileNotFoundError:
-        log.info("users.json пока нет, начинаем с пустого списка")
+        return
     except Exception:
         log.exception("Не удалось прочитать users.json")
-
-
-def save_users() -> None:
-    try:
-        with open(USERS_FILE, "w", encoding="utf-8") as f:
-            json.dump(users, f, ensure_ascii=False, indent=2)
-    except Exception:
-        log.exception("Не удалось сохранить users.json")
 
 
 def register_user(user, chat_id: int, username_hint: str = "") -> None:
     if user is None:
         return
-    key = str(user.id)
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    row = users.get(key)
-    if row is None:
-        users[key] = {
-            "id": user.id,
-            "chat_id": chat_id,
-            "username": user.username or username_hint or "",
-            "first_name": user.first_name or "",
-            "last_name": user.last_name or "",
-            "first_seen": now,
-            "last_seen": now,
-            "messages": 1,
-        }
-    else:
-        row["chat_id"] = chat_id
-        row["last_seen"] = now
-        row["messages"] = int(row.get("messages", 0)) + 1
-        if user.username:
-            row["username"] = user.username
-    save_users()
+    try:
+        store.touch_user(
+            user.id,
+            chat_id,
+            user.username or username_hint or "",
+            user.first_name or "",
+            user.last_name or "",
+        )
+    except Exception:
+        log.exception("Не удалось записать пользователя в базу")
 
 
 def split_text(text: str, limit: int = TG_LIMIT) -> list[str]:
@@ -359,39 +351,8 @@ async def on_check_subscription(callback: CallbackQuery) -> None:
 
 # ---------- Telegram Business: работа от лица подключённого аккаунта ----------
 
-business_connections: dict[str, dict] = {}
-business_history: dict[str, dict[int, list[dict]]] = {}
-business_peer_names: dict[str, dict[int, str]] = {}
 BUSINESS_KEEP = 80
 BUSINESS_SIGNATURE = "\n\n🤖 нейросеть"
-STATE_FILE = Path("business_state.json")
-
-
-def load_state() -> None:
-    try:
-        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return
-    for cid, info in (data.get("connections") or {}).items():
-        if isinstance(info, dict):
-            business_connections[cid] = info
-    for cid, peers in (data.get("peers") or {}).items():
-        try:
-            business_peer_names[cid] = {int(k): v for k, v in peers.items()}
-        except Exception:
-            continue
-    log.info("Состояние подхвачено: подключений %d", len(business_connections))
-
-
-def save_state() -> None:
-    data = {
-        "connections": business_connections,
-        "peers": {cid: {str(k): v for k, v in m.items()} for cid, m in business_peer_names.items()},
-    }
-    try:
-        STATE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        log.warning("Не удалось сохранить состояние подключений", exc_info=True)
 
 
 PROFILE_INSTRUCTION = (
@@ -408,7 +369,7 @@ PROFILE_INSTRUCTION = (
 @dp.business_connection()
 async def on_business_connection(connection: BusinessConnection) -> None:
     rights = connection.rights.model_dump() if connection.rights else {}
-    business_connections[connection.id] = {
+    info = {
         "user_id": connection.user.id,
         "username": connection.user.username or "",
         "name": connection.user.full_name,
@@ -416,6 +377,7 @@ async def on_business_connection(connection: BusinessConnection) -> None:
         "can_reply": connection.can_reply,
         "rights": rights,
     }
+    store.save_connection(connection.id, info)
     log.info(
         "Business-подключение %s: %s (@%s), активно=%s, чтение=%s, ответ=%s",
         connection.id,
@@ -425,7 +387,6 @@ async def on_business_connection(connection: BusinessConnection) -> None:
         rights.get("can_read_messages"),
         connection.can_reply,
     )
-    save_state()
 
 
 async def refresh_connection(bot: Bot, cid: str) -> None:
@@ -435,15 +396,17 @@ async def refresh_connection(bot: Bot, cid: str) -> None:
         log.warning("Не удалось обновить подключение %s: %s", cid, type(exc).__name__)
         return
     rights = connection.rights.model_dump() if connection.rights else {}
-    business_connections[cid] = {
-        "user_id": connection.user.id,
-        "username": connection.user.username or "",
-        "name": connection.user.full_name,
-        "enabled": connection.is_enabled,
-        "can_reply": connection.can_reply,
-        "rights": rights,
-    }
-    save_state()
+    store.save_connection(
+        cid,
+        {
+            "user_id": connection.user.id,
+            "username": connection.user.username or "",
+            "name": connection.user.full_name,
+            "enabled": connection.is_enabled,
+            "can_reply": connection.can_reply,
+            "rights": rights,
+        },
+    )
 
 
 async def remember_business_message(message: Message) -> None:
@@ -454,37 +417,34 @@ async def remember_business_message(message: Message) -> None:
     if not text:
         return
 
-    if cid not in business_connections:
-        business_connections[cid] = {
-            "user_id": None,
-            "username": "",
-            "name": "подключённый аккаунт",
-            "enabled": True,
-            "can_reply": True,
-            "rights": {},
-        }
+    known = store.connections().get(cid)
+    if known is None:
+        store.save_connection(
+            cid,
+            {
+                "user_id": None,
+                "username": "",
+                "name": "подключённый аккаунт",
+                "enabled": True,
+                "can_reply": True,
+                "rights": {},
+            },
+        )
         log.info("Подхватил подключение %s из входящего сообщения", cid)
-        save_state()
+        known = store.connections().get(cid) or {}
 
-    info = business_connections.get(cid) or {}
-    owner_id = info.get("user_id")
+    owner_id = known.get("user_id")
     from_me = message.from_user is not None and owner_id is not None and message.from_user.id == owner_id
+    username = message.chat.username or (message.from_user.username if message.from_user else "") or ""
+    name = message.chat.full_name if getattr(message.chat, "full_name", None) else ""
 
-    bucket = business_history.setdefault(cid, {})
-    items = bucket.setdefault(message.chat.id, [])
-    items.append(
-        {
-            "me": from_me,
-            "text": text[:800],
-            "date": message.date.isoformat() if message.date else "",
-        }
+    store.add_peer(cid, message.chat.id, username, name)
+    store.add_message(
+        "me" if from_me else "peer",
+        text,
+        connection_id=cid,
+        chat_id=message.chat.id,
     )
-    del items[:-BUSINESS_KEEP]
-
-    username = message.chat.username or (message.from_user.username if message.from_user else None)
-    if username:
-        business_peer_names.setdefault(cid, {})[message.chat.id] = username
-        save_state()
 
 
 @dp.business_message()
@@ -498,14 +458,15 @@ async def on_edited_business_message(message: Message) -> None:
 
 
 def active_connection() -> tuple[str, dict] | None:
-    for cid, info in business_connections.items():
+    for cid, info in store.connections().items():
         if info.get("enabled"):
             return cid, info
     return None
 
 
 def business_status_text() -> str:
-    if not business_connections:
+    connections = store.connections()
+    if not connections:
         return (
             "🔌 Подключения не вижу.\n\n"
             "Telegram присылает событие о подключении один раз — если оно случилось, "
@@ -522,22 +483,22 @@ def business_status_text() -> str:
         )
 
     lines = ["🔌 Подключение к аккаунту:"]
-    for cid, info in business_connections.items():
+    for cid, info in connections.items():
         rights = info.get("rights") or {}
         state = "активно ✅" if info.get("enabled") else "отключено ⛔"
-        peers = business_history.get(cid, {})
-        count = sum(len(v) for v in peers.values())
+        peer_rows = store.peers(cid)
+        total = sum(len(store.peer_messages(cid, chat_id, 1000)) for chat_id in peer_rows)
         lines += [
             "",
             f"• {info.get('name', '?')} @{info.get('username') or '—'} — {state}",
             f"  читает личные чаты: {'да' if rights.get('can_read_messages') else 'нет'}",
             f"  может отвечать: {'да' if info.get('can_reply') else 'нет'}",
-            f"  чатов в памяти: {len(peers)} · сообщений: {count}",
+            f"  чатов в базе: {len(peer_rows)} · сообщений: {total}",
         ]
     lines += [
         "",
         "Команды: «напиши @username «текст»» и «расскажи о @username».",
-        "Подключение сохраняется между перезапусками, переписка — только в памяти процесса.",
+        "Подключение и переписка хранятся в базе и переживают перезапуски.",
     ]
     return "\n".join(lines)
 
@@ -547,7 +508,7 @@ async def cmd_adm(message: Message) -> None:
     if not is_admin(message):
         await message.answer("Эта команда только для администратора.")
         return
-    for cid in list(business_connections):
+    for cid in list(store.connections()):
         await refresh_connection(message.bot, cid)
     await message.answer(
         business_status_text(),
@@ -567,13 +528,49 @@ async def on_adm_refresh(callback: CallbackQuery) -> None:
     await callback.answer("Обновлено")
 
 
+SELF_PROFILE_INSTRUCTION = (
+    "Ты — A-Gamma. По фрагменту вашей переписки с пользователем собери короткий портрет: "
+    "1) как его зовут и как он предпочитает обращение; 2) чем занимается и что ему интересно; "
+    "3) стиль общения и характер; 4) что просил и что важно помнить; 5) о чём с ним можно поговорить. "
+    "Опирайся только на переписку, догадки помечай словом «похоже». 5–8 пунктов, живо, с эмодзи."
+)
+
+
+async def self_profile(message: Message) -> bool:
+    user_id = message.from_user.id
+    total = store.user_count_message(user_id)
+    if total < 2:
+        await message.answer(
+            "Я пока о тебе почти ничего не знаю — напиши пару сообщений, и я начну запоминать."
+        )
+        return True
+
+    rows = store.archive(user_id, 200)
+    digest = "\n".join(
+        ("Я: " if role == "model" else "Пользователь: ") + text.replace("\n", " ") for role, text in rows
+    )[-12000:]
+    thinking = await message.reply("🧠 Собираю, что я о тебе знаю…")
+    try:
+        text = await asyncio.to_thread(
+            ask_model,
+            [types.Part.from_text(text=f"Переписка:\n\n{digest}")],
+            [],
+            SELF_PROFILE_INSTRUCTION,
+        )
+    except Exception:
+        log.exception("Ошибка сборки профиля")
+        await thinking.delete()
+        await message.answer("Не получилось собрать профиль, попробуй чуть позже.")
+        return True
+
+    await thinking.delete()
+    for chunk in split_text(text):
+        await message.reply(to_html(chunk), parse_mode="HTML")
+    return True
+
+
 def find_peer(username: str) -> tuple[str, int] | None:
-    low = username.lower()
-    for cid, names in business_peer_names.items():
-        for peer_id, name in names.items():
-            if name.lower() == low:
-                return cid, peer_id
-    return None
+    return store.peer_by_username(username)
 
 
 async def resolve_peer(message: Message, username: str) -> tuple[str, int] | None:
@@ -636,7 +633,7 @@ async def business_profile(message: Message, username: str) -> bool:
         return True
 
     cid, peer_id = target
-    items = business_history.get(cid, {}).get(peer_id, [])
+    items = store.peer_messages(cid, peer_id, BUSINESS_KEEP)
     if len(items) < 3:
         await message.answer(
             f"С @{username} всего {len(items)} сообщ. — этого мало для анализа. "
@@ -645,7 +642,8 @@ async def business_profile(message: Message, username: str) -> bool:
         return True
 
     digest = "\n".join(
-        ("Я: " if item["me"] else "Собеседник: ") + item["text"].replace("\n", " ") for item in items[-60:]
+        ("Я: " if item["role"] == "me" else "Собеседник: ") + item["text"].replace("\n", " ")
+        for item in items[-60:]
     )
     parts = [types.Part.from_text(text=f"Переписка с @{username}:\n\n{digest}")]
     thinking = await message.reply("🧠 Читаю переписку…")
@@ -684,23 +682,25 @@ async def try_business_intent(message: Message, text: str) -> bool:
 
 
 def users_report() -> list[str]:
-    if not users:
+    rows = store.users(200)
+    if not rows:
         return ["Пока никто не писал боту."]
-    rows = sorted(users.values(), key=lambda r: int(r.get("messages", 0)), reverse=True)
     lines = [f"👥 Пользователей: {len(rows)}", ""]
     for i, r in enumerate(rows, 1):
-        uname = f"@{r['username']}" if r.get("username") else "без username"
-        name = " ".join(x for x in [r.get("first_name", ""), r.get("last_name", "")] if x).strip()
+        uname = f"@{r['username']}" if r["username"] else "без username"
+        name = " ".join(x for x in [r["first_name"] or "", r["last_name"] or ""] if x).strip()
         lines.append(
-            f"{i}. ID {r['id']} · {uname} · {name or 'без имени'} · "
-            f"{r.get('messages', 0)} сообщ. · впервые {r.get('first_seen', '?')[:16]}"
+            f"{i}. ID {r['user_id']} · {uname} · {name or 'без имени'} · "
+            f"{r['messages']} сообщ. · впервые {(r['first_seen'] or '?')[:16]}"
         )
     return lines
 
 
 async def broadcast(bot: Bot, text: str) -> tuple[int, int]:
     ok, failed = 0, 0
-    for r in list(users.values()):
+    for r in store.users(1000):
+        if not r["chat_id"]:
+            continue
         try:
             await bot.send_message(chat_id=r["chat_id"], text=text)
             ok += 1
@@ -742,8 +742,14 @@ async def answer(message: Message, parts: list, user_text: str) -> None:
         return
     last_request[user_id] = now
 
-    past = history.setdefault(user_id, [])
-    instruction = SYSTEM_PROMPTS.get(user_mode.get(user_id, "normal"), SYSTEM_PROMPT)
+    past = [
+        types.Content(role=role, parts=[types.Part.from_text(text=text)])
+        for role, text in store.context(user_id, HISTORY_TURNS)
+        if role in {"user", "model"}
+    ]
+    store.add_message("user", user_text, user_id=user_id)
+
+    instruction = SYSTEM_PROMPTS.get(store.get_mode(user_id), SYSTEM_PROMPT)
     thinking = await message.reply("🤔 Думаю…")
     await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
     try:
@@ -759,9 +765,7 @@ async def answer(message: Message, parts: list, user_text: str) -> None:
 
     await thinking.delete()
 
-    past.append(types.Content(role="user", parts=[types.Part.from_text(text=user_text)]))
-    past.append(types.Content(role="model", parts=[types.Part.from_text(text=text)]))
-    del past[: max(0, len(past) - HISTORY_TURNS * 2)]
+    store.add_message("model", text, user_id=user_id)
 
     for chunk in split_text(text):
         await message.reply(to_html(chunk), parse_mode="HTML")
@@ -799,8 +803,8 @@ async def cmd_vopros(message: Message) -> None:
 
 @dp.message(Command("dir"))
 async def cmd_dir(message: Message) -> None:
-    user_mode[message.from_user.id] = "aggro"
-    history.pop(message.from_user.id, None)
+    store.set_mode(message.from_user.id, "aggro")
+    store.clear_context(message.from_user.id)
     await message.answer(
         "😈 Режим переключён: теперь я в агрессивном режиме — отвечаю резко, язвительно и без церемоний.\n\n"
         "🔙 Чтобы вернуть обычный спокойный режим, отправь /andir"
@@ -809,8 +813,8 @@ async def cmd_dir(message: Message) -> None:
 
 @dp.message(Command("andir"))
 async def cmd_andir(message: Message) -> None:
-    user_mode[message.from_user.id] = "normal"
-    history.pop(message.from_user.id, None)
+    store.set_mode(message.from_user.id, "normal")
+    store.clear_context(message.from_user.id)
     await message.answer(
         "😌 Режим переключён: снова обычный, спокойный и дружелюбный A-Gamma.\n\n"
         "🔁 Чтобы снова включить агрессивный режим, отправь /dir"
@@ -819,8 +823,27 @@ async def cmd_andir(message: Message) -> None:
 
 @dp.message(Command("reset"))
 async def cmd_reset(message: Message) -> None:
-    history.pop(message.from_user.id, None)
-    await message.answer("🧹 Память диалога очищена. Начинаем с чистого листа.")
+    store.clear_context(message.from_user.id)
+    await message.answer(
+        "🧹 Контекст диалога очищен — отвечаю так, будто мы только познакомились.\n\n"
+        "📚 Архив переписки остаётся в базе: по нему я потом смогу рассказать о тебе.\n"
+        "🗑 Удалить всё полностью — /forget"
+    )
+
+
+@dp.message(Command("forget"))
+async def cmd_forget(message: Message) -> None:
+    store.forget_user(message.from_user.id)
+    last_request.pop(message.from_user.id, None)
+    await message.answer(
+        "🗑 Готово: удалил из базы твои сообщения, профиль и настройки. "
+        "Дальше я тебя не помню."
+    )
+
+
+@dp.message(Command("aboutme"))
+async def cmd_aboutme(message: Message) -> None:
+    await self_profile(message)
 
 
 @dp.message(Command("help"))
@@ -830,10 +853,12 @@ async def cmd_help(message: Message) -> None:
         "1. 💬 Просто общайся — отвечу на любой вопрос и поддержу разговор.\n"
         "2. 📸 Отправь фото задания — решу по шагам и дам ответ.\n"
         "3. 📎 Фото как файл (без сжатия) — качество распознавания выше.\n"
-        "4. 🧹 /reset — очистить память диалога и начать заново.\n"
+        "4. 🧹 /reset — очистить текущий контекст, архив переписки останется в базе.\n"
         "5. 😈 /dir — агрессивный режим, 🔙 /andir — вернуть спокойный.\n"
-        "6. 📖 /vopros — расскажу о себе.\n\n"
-        f"Я помню последние {HISTORY_TURNS} сообщений. "
+        "6. 📖 /vopros — расскажу о себе.\n"
+        "7. 👤 /aboutme — расскажу, что я о тебе знаю по переписке.\n"
+        "8. 🗑 /forget — удалить всё о тебе из базы насовсем.\n\n"
+        f"Для ответа беру последние {HISTORY_TURNS} сообщений, остальное лежит в базе. "
         f"Ограничения: не больше {MAX_IMAGE_MB} МБ на изображение, "
         f"один запрос в {COOLDOWN_SECONDS} сек."
     )
@@ -918,7 +943,7 @@ async def cmd_tech(message: Message) -> None:
         f"Запущен: {STARTED_AT.strftime('%Y-%m-%d %H:%M UTC')}\n"
         f"Аптайм: {uptime.days} д {uptime.seconds // 3600} ч {uptime.seconds % 3600 // 60} мин\n"
         f"Хостинг: GitHub Actions (перезапуск каждые 6 часов)\n"
-        f"Пользователей в базе: {len(users)}"
+        f"Пользователей в базе: {len(store.users(1000))}"
     )
 
 
@@ -931,6 +956,10 @@ async def on_text(message: Message) -> None:
         return
 
     if await try_business_intent(message, text):
+        return
+
+    if re.search(r"(?i)(обо мне|про меня|мой профиль|что ты (обо мне )?(знаешь|помнишь|записал))", text):
+        await self_profile(message)
         return
 
     if len(text) > 6000:
@@ -983,14 +1012,30 @@ async def start_health_server() -> None:
     log.info("Health-сервер слушает порт %s", port_raw)
 
 
+async def sync_loop() -> None:
+    while True:
+        await asyncio.sleep(SYNC_MINUTES * 60)
+        try:
+            await asyncio.to_thread(sync.push)
+        except Exception:
+            log.exception("Не удалось синхронизировать базу")
+
+
 async def main() -> None:
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
-    load_state()
+    if sync.restore():
+        log.info("База поднята из зашифрованного снимка")
+    store.init()
+    asyncio.create_task(sync_loop())
     log.info("Бот запущен, модели: %s", ", ".join(MODELS))
     try:
         await start_health_server()
         await dp.start_polling(bot)
     finally:
+        try:
+            await asyncio.to_thread(sync.push)
+        except Exception:
+            log.exception("Финальная синхронизация не удалась")
         await bot.session.close()
 
 

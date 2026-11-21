@@ -51,7 +51,7 @@ jobs:
           python - <<'PY'
           import bot
           names = {h.callback.__name__ for h in bot.dp.message.handlers}
-          need = {"cmd_start", "on_text", "on_photo", "on_document", "cmd_help", "cmd_adm"}
+          need = {"cmd_start", "on_text", "on_photo", "on_document", "cmd_help", "cmd_adm", "cmd_aboutme", "cmd_forget"}
           missing = need - names
           assert not missing, f"нет обработчиков: {sorted(missing)}"
           assert len(bot.dp.business_message.handlers) == 1, "нет бизнес-обработчика"
@@ -62,22 +62,24 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DB_KEY: ${{ secrets.DB_KEY }}
           MODELS: gemini-3.5-flash-lite,gemini-3.1-flash-lite
           HISTORY_TURNS: "8"
           COOLDOWN_SECONDS: "5"
           MAX_IMAGE_MB: "10"
+          SYNC_MINUTES: "10"
         run: |
           timeout --signal=INT "${{ github.event.inputs.seconds || 21000 }}" python -u bot.py || true
 
-      - name: Save business state
+      - name: Save database snapshot
         if: always()
         run: |
-          if [ -f business_state.json ] && [ -n "$(git status --porcelain business_state.json)" ]; then
+          if [ -f data/bot.db.enc ] && [ -n "$(git status --porcelain data/bot.db.enc)" ]; then
             git config user.name "gamma-bot"
             git config user.email "bot@users.noreply.github.com"
-            git add business_state.json
-            git commit -m "state: business connections [skip ci]"
+            git add data/bot.db.enc
+            git commit -m "state: база бота [skip ci]"
             git push || true
           else
-            echo "состояние без изменений"
+            echo "снимок базы без изменений"
           fi
