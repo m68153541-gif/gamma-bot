@@ -12,7 +12,8 @@ from aiogram import Bot, BaseMiddleware, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatAction
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -120,7 +121,11 @@ last_request: dict[int, float] = {}
 history: dict[int, list[types.Content]] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.4.0"
+BOT_VERSION = "1.5.0"
+
+CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
+CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
+_gate_warned = False
 STARTED_AT = datetime.now(timezone.utc)
 USERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "users.json")
 users: dict[str, dict] = {}
@@ -271,6 +276,80 @@ def is_admin(message: Message) -> bool:
     return message.from_user is not None and message.from_user.id == ADMIN_ID
 
 
+GATE_TEXT = (
+    "🔒 Чтобы пользоваться A-Gamma, подпишись на наш канал.\n\n"
+    f"1️⃣ Нажми «Подписаться» и подпишись: {CHANNEL_URL}\n"
+    "2️⃣ Вернись сюда и нажми «Проверить подписку».\n\n"
+    "Как только проверка пройдёт — сразу продолжим 👌"
+)
+
+
+def subscribe_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📣 Подписаться", url=CHANNEL_URL),
+                InlineKeyboardButton(text="✅ Проверить подписку", callback_data="check_sub"),
+            ]
+        ]
+    )
+
+
+async def subscription_status(bot: Bot, user_id: int) -> bool | None:
+    global _gate_warned
+    try:
+        member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
+    except TelegramBadRequest as exc:
+        if not _gate_warned:
+            _gate_warned = True
+            log.warning(
+                "Подписку проверить нельзя (%s). Бот должен быть админом канала %s",
+                exc,
+                CHANNEL_USERNAME,
+            )
+        return None
+    except Exception:
+        log.exception("Ошибка проверки подписки")
+        return None
+    return member.status in ("member", "administrator", "creator")
+
+
+async def require_subscription(message: Message) -> bool:
+    if message.from_user is None or is_admin(message):
+        return True
+    status = await subscription_status(message.bot, message.from_user.id)
+    if status is None or status:
+        return True
+    await message.answer(GATE_TEXT, reply_markup=subscribe_keyboard(), disable_web_page_preview=True)
+    return False
+
+
+@dp.callback_query(F.data == "check_sub")
+async def on_check_subscription(callback: CallbackQuery) -> None:
+    status = await subscription_status(callback.bot, callback.from_user.id)
+    if status is None:
+        await callback.answer(
+            "Не получается проверить подписку: бот должен быть администратором канала.",
+            show_alert=True,
+        )
+        return
+    if not status:
+        await callback.answer("Подписки пока нет. Подпишись на канал и нажми кнопку снова 🙏", show_alert=True)
+        return
+    if callback.message is not None:
+        try:
+            await callback.message.delete()
+        except Exception:
+            log.exception("Не удалось удалить сообщение с просьбой подписаться")
+    await callback.bot.send_message(
+        callback.from_user.id,
+        "✅ Подписка подтверждена — я готов к работе!\n\n"
+        "💬 Напиши вопрос или пришли фото задания, и я разберу его по шагам.",
+    )
+    await callback.answer("Готово")
+
+
+
 def users_report() -> list[str]:
     if not users:
         return ["Пока никто не писал боту."]
@@ -357,6 +436,8 @@ async def answer(message: Message, parts: list, user_text: str) -> None:
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message) -> None:
+    if not await require_subscription(message):
+        return
     await message.answer(
         "👋 Привет! Я A-Gamma — нейросеть, разработанная Laki Good, на синтаксисе Diana Lovis.\n\n"
         "💬 Могу поболтать на любую тему — от учёбы и техники до фильмов и планов.\n"
@@ -427,6 +508,8 @@ async def cmd_help(message: Message) -> None:
 
 @dp.message(F.photo)
 async def on_photo(message: Message) -> None:
+    if not await require_subscription(message):
+        return
     photo = message.photo[-1]
     if photo.file_size and photo.file_size > MAX_IMAGE_MB * 1024 * 1024:
         await message.reply(f"Фото больше {MAX_IMAGE_MB} МБ. Пришли, пожалуйста, поменьше.")
@@ -441,6 +524,8 @@ async def on_photo(message: Message) -> None:
 
 @dp.message(F.document)
 async def on_document(message: Message) -> None:
+    if not await require_subscription(message):
+        return
     doc = message.document
     mime = (doc.mime_type or "").lower()
     if mime not in {"image/jpeg", "image/png", "image/webp"}:
@@ -508,6 +593,8 @@ async def cmd_tech(message: Message) -> None:
 async def on_text(message: Message) -> None:
     text = message.text.strip()
     if not text:
+        return
+    if not await require_subscription(message):
         return
     if len(text) > 6000:
         await message.reply("Слишком длинное сообщение, сократи, пожалуйста, до 6000 символов.")
