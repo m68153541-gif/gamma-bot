@@ -130,7 +130,7 @@ dp = Dispatcher()
 last_request: dict[int, float] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.14.1"
+BOT_VERSION = "1.15.0"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -359,7 +359,9 @@ BUSINESS_SIGNATURE = "\n\n🤖 нейросеть"
 
 
 PROFILE_INSTRUCTION = (
-    "Ты аналитик переписки. По фрагменту диалога опиши по-русски, по пунктам: "
+    "Ты аналитик переписки. Реплики подписаны юзернеймами авторов «@username: текст» — "
+    "не путай, кто что написал, и опирайся на слова каждого участника отдельно. "
+    "По фрагменту диалога опиши по-русски, по пунктам: "
     "1) кто собеседник по манере общения — стиль, интересы, характер; "
     "2) тон и основные темы; "
     "3) динамику отношений: дружеская, деловая, напряжённая или романтическая — с обоснованием из текста; "
@@ -459,11 +461,24 @@ async def remember_business_message(message: Message) -> None:
     name = message.chat.full_name if getattr(message.chat, "full_name", None) else ""
 
     store.add_peer(cid, message.chat.id, username, name)
+
+    sender = message.from_user
+    author_username = ""
+    if sender is not None:
+        if from_me:
+            author_username = known.get("username") or ""
+        else:
+            author_username = sender.username or username or ""
+    elif from_me:
+        author_username = known.get("username") or ""
+
     store.add_message(
         "me" if from_me else "peer",
         text,
         connection_id=cid,
         chat_id=message.chat.id,
+        author_id=sender.id if sender is not None else None,
+        author_username=author_username,
     )
 
 
@@ -773,10 +788,7 @@ async def show_chat(
         )
         return True
 
-    digest = "\n".join(
-        ("Я: " if item["role"] == "me" else "Собеседник: ") + item["text"].replace("\n", " ")
-        for item in items[-60:]
-    )
+    digest = "\n".join(digest_line(item) for item in items[-60:])
     header = f"Переписка с @{peer_name}" + (f" (аккаунт @{account})" if account else "")
     parts = [types.Part.from_text(text=f"{header}:\n\n{digest}")]
     thinking = await message.reply("🧠 Читаю переписку…")
@@ -794,26 +806,35 @@ async def show_chat(
     return True
 
 
+def digest_line(item: dict) -> str:
+    name = (item.get("author_username") or "").strip()
+    text = item["text"].replace("\n", " ")
+    if name:
+        return f"@{name}: {text}"
+    return ("Я: " if item["role"] == "me" else "Собеседник: ") + text
+
+
 def peer_digest(cid: str, chat_id: int, limit: int = 40) -> str:
     rows = store.peer_messages(cid, chat_id, limit)
-    return "\n".join(
-        ("Я: " if r["role"] == "me" else "Собеседник: ") + r["text"].replace("\n", " ") for r in rows
-    )
+    return "\n".join(digest_line(r) for r in rows)
 
 
 ACCOUNT_INSTRUCTION = (
     "Ты разбираешь подключённый к боту аккаунт Telegram по фрагментам его переписок. "
+    "Каждая реплика подписана юзернеймом автора: «@username: текст». Никогда не смешивай авторов "
+    "и приписывай слова только тому, кто их написал. "
     "Опиши: 1) чем занимается владелец аккаунта и что ему важно; 2) какие темы и стиль общения; "
     "3) с кем общается и как к нему относятся — друг, коллега, тёплое или натянутое общение; "
     "4) кто, похоже, влюблён, кто держится холодно, кто давит и потенциально опасен — "
-    "с обоснованием из реплик. Догадки помечай словом «похоже», фактов не выдумывай. "
-    "Списком, живо, с эмодзи."
+    "с обоснованием из реплик конкретных @юзернеймов. Догадки помечай словом «похоже», "
+    "фактов не выдумывай. Списком, живо, с эмодзи."
 )
 
 
 PAIR_INSTRUCTION = (
-    "Ты разбираешь личную переписку владельца аккаунта с несколькими людьми. По фрагментам чатов "
-    "сравни собеседников между собой: чем они отличаются по манере общения, кто к тебе теплее, "
+    "Ты разбираешь личные переписки по фрагментам чатов. Каждая реплика подписана юзернеймом "
+    "автора: «@username: текст». Строго различай, кто что сказал, и цитируй именно его слова. "
+    "Сравни собеседников между собой: чем они отличаются по манере общения, кто к тебе теплее, "
     "кто суше, где есть напряжение, кто ждёт больше внимания. "
     "Дай: 1) короткий портрет каждого; 2) как каждый относится к владельцу — как к другу, коллеге, "
     "возлюбленному или врагу, с обоснованием из реплик; 3) кто ближе к тебе и почему; "

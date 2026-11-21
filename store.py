@@ -40,7 +40,9 @@ SCHEMA = [
     text TEXT NOT NULL,
     ts TEXT NOT NULL,
     connection_id TEXT,
-    chat_id INTEGER
+    chat_id INTEGER,
+    author_id INTEGER,
+    author_username TEXT
 )""",
     "CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id, id)",
     "CREATE INDEX IF NOT EXISTS idx_messages_peer ON messages(connection_id, chat_id, id)",
@@ -173,6 +175,14 @@ def init() -> None:
             _turso.request([(sql, ()) for sql in SCHEMA])
         else:
             connect()
+    for statement in (
+        "ALTER TABLE messages ADD COLUMN author_id INTEGER",
+        "ALTER TABLE messages ADD COLUMN author_username TEXT",
+    ):
+        try:
+            _write(statement)
+        except Exception:
+            pass
 
 
 def _write(sql: str, params: tuple = ()) -> None:
@@ -249,10 +259,13 @@ def add_message(
     user_id: int | None = None,
     connection_id: str | None = None,
     chat_id: int | None = None,
+    author_id: int | None = None,
+    author_username: str = "",
 ) -> None:
     _write(
-        "INSERT INTO messages (user_id, role, text, ts, connection_id, chat_id) VALUES (?, ?, ?, ?, ?, ?)",
-        (user_id, role, text[:4000], now_iso(), connection_id, chat_id),
+        "INSERT INTO messages (user_id, role, text, ts, connection_id, chat_id, author_id, author_username)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (user_id, role, text[:4000], now_iso(), connection_id, chat_id, author_id, author_username[:64]),
     )
 
 
@@ -358,10 +371,20 @@ def peer_by_username(username: str, connection_ids: list[str] | None = None) -> 
 
 def peer_messages(connection_id: str, chat_id: int, limit: int = 60) -> list[dict]:
     rows = _rows(
-        "SELECT role, text, ts FROM messages WHERE connection_id = ? AND chat_id = ? ORDER BY id DESC LIMIT ?",
+        "SELECT role, text, ts, author_id, author_username FROM messages"
+        " WHERE connection_id = ? AND chat_id = ? ORDER BY id DESC LIMIT ?",
         (connection_id, chat_id, limit),
     )
-    return [{"role": r["role"], "text": r["text"], "ts": r["ts"]} for r in reversed(rows)]
+    return [
+        {
+            "role": r["role"],
+            "text": r["text"],
+            "ts": r["ts"],
+            "author_id": r.get("author_id"),
+            "author_username": r.get("author_username") or "",
+        }
+        for r in reversed(rows)
+    ]
 
 
 def save_touch() -> None:
