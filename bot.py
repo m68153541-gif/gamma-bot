@@ -13,7 +13,13 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatAction
 from aiogram.filters import Command, CommandStart
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    BusinessConnection,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -121,7 +127,7 @@ last_request: dict[int, float] = {}
 history: dict[int, list[types.Content]] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.5.0"
+BOT_VERSION = "1.6.0"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -349,6 +355,264 @@ async def on_check_subscription(callback: CallbackQuery) -> None:
     await callback.answer("Готово")
 
 
+# ---------- Telegram Business: работа от лица подключённого аккаунта ----------
+
+business_connections: dict[str, dict] = {}
+business_history: dict[str, dict[int, list[dict]]] = {}
+business_peer_names: dict[str, dict[int, str]] = {}
+BUSINESS_KEEP = 80
+BUSINESS_SIGNATURE = "\n\n🤖 нейросеть"
+
+PROFILE_INSTRUCTION = (
+    "Ты аналитик переписки. По фрагменту диалога опиши по-русски, по пунктам: "
+    "1) кто собеседник по манере общения — стиль, интересы, характер; "
+    "2) тон и основные темы; "
+    "3) динамику отношений: дружеская, деловая, напряжённая или романтическая — с обоснованием из текста; "
+    "4) на что стоит обратить внимание. "
+    "Всё это только предположения по переписке, так и формулируй: «похоже», «судя по сообщениям». "
+    "Не выдумывай факты о человеке, которых нет в тексте. Кратко, живым языком, с эмодзи по смыслу."
+)
+
+
+@dp.business_connection()
+async def on_business_connection(connection: BusinessConnection) -> None:
+    rights = connection.rights.model_dump() if connection.rights else {}
+    business_connections[connection.id] = {
+        "user_id": connection.user.id,
+        "username": connection.user.username or "",
+        "name": connection.user.full_name,
+        "enabled": connection.is_enabled,
+        "can_reply": connection.can_reply,
+        "rights": rights,
+    }
+    log.info(
+        "Business-подключение %s: %s (@%s), активно=%s, чтение=%s, ответ=%s",
+        connection.id,
+        connection.user.full_name,
+        connection.user.username,
+        connection.is_enabled,
+        rights.get("can_read_messages"),
+        connection.can_reply,
+    )
+
+
+async def remember_business_message(message: Message) -> None:
+    cid = message.business_connection_id
+    if not cid:
+        return
+    text = (message.text or message.caption or "").strip()
+    if not text:
+        return
+    info = business_connections.get(cid) or {}
+    owner_id = info.get("user_id")
+    from_me = message.from_user is not None and owner_id is not None and message.from_user.id == owner_id
+
+    bucket = business_history.setdefault(cid, {})
+    items = bucket.setdefault(message.chat.id, [])
+    items.append(
+        {
+            "me": from_me,
+            "text": text[:800],
+            "date": message.date.isoformat() if message.date else "",
+        }
+    )
+    del items[:-BUSINESS_KEEP]
+
+    username = message.chat.username or (message.from_user.username if message.from_user else None)
+    if username:
+        business_peer_names.setdefault(cid, {})[message.chat.id] = username
+
+
+@dp.business_message()
+async def on_business_message(message: Message) -> None:
+    await remember_business_message(message)
+
+
+@dp.edited_business_message()
+async def on_edited_business_message(message: Message) -> None:
+    await remember_business_message(message)
+
+
+def active_connection() -> tuple[str, dict] | None:
+    for cid, info in business_connections.items():
+        if info.get("enabled"):
+            return cid, info
+    return None
+
+
+def business_status_text() -> str:
+    if not business_connections:
+        return (
+            "🔌 Бот пока не подключён к аккаунту.\n\n"
+            "Как подключить:\n"
+            "1️⃣ Нужен Telegram Premium — бизнес-боты работают только с ним.\n"
+            "2️⃣ Настройки → Telegram Business → Чат-боты → добавить @gamma_zyzabot.\n"
+            "3️⃣ Разреши чтение сообщений и ответы, сохрани.\n"
+            "4️⃣ Вернись сюда и снова отправь /adm.\n\n"
+            "После подключения заработают команды:\n"
+            "• «напиши @username «текст»» — отправлю от твоего лица с подписью «нейросеть»\n"
+            "• «расскажи о @username» — разберу переписку и тон общения"
+        )
+
+    lines = ["🔌 Подключение к аккаунту:"]
+    for cid, info in business_connections.items():
+        rights = info.get("rights") or {}
+        state = "активно ✅" if info.get("enabled") else "отключено ⛔"
+        peers = business_history.get(cid, {})
+        count = sum(len(v) for v in peers.values())
+        lines += [
+            "",
+            f"• {info.get('name', '?')} @{info.get('username') or '—'} — {state}",
+            f"  читает личные чаты: {'да' if rights.get('can_read_messages') else 'нет'}",
+            f"  может отвечать: {'да' if info.get('can_reply') else 'нет'}",
+            f"  чатов в памяти: {len(peers)} · сообщений: {count}",
+        ]
+    lines += [
+        "",
+        "Команды: «напиши @username «текст»» и «расскажи о @username».",
+        "Переписка хранится только в памяти процесса — после перезапуска история начинается заново.",
+    ]
+    return "\n".join(lines)
+
+
+@dp.message(Command("adm"))
+async def cmd_adm(message: Message) -> None:
+    if not is_admin(message):
+        await message.answer("Эта команда только для администратора.")
+        return
+    await message.answer(
+        business_status_text(),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="🔄 Обновить статус", callback_data="adm_refresh")]]
+        ),
+    )
+
+
+@dp.callback_query(F.data == "adm_refresh")
+async def on_adm_refresh(callback: CallbackQuery) -> None:
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Только для администратора", show_alert=True)
+        return
+    if callback.message is not None:
+        await callback.message.edit_text(business_status_text())
+    await callback.answer("Обновлено")
+
+
+def find_peer(username: str) -> tuple[str, int] | None:
+    low = username.lower()
+    for cid, names in business_peer_names.items():
+        for peer_id, name in names.items():
+            if name.lower() == low:
+                return cid, peer_id
+    return None
+
+
+async def resolve_peer(message: Message, username: str) -> tuple[str, int] | None:
+    found = find_peer(username)
+    if found:
+        return found
+    conn = active_connection()
+    if conn is None:
+        return None
+    try:
+        chat = await message.bot.get_chat(f"@{username}")
+    except Exception:
+        return None
+    return conn[0], chat.id
+
+
+async def business_send(message: Message, username: str | None, text: str) -> bool:
+    conn = active_connection()
+    if conn is None:
+        await message.answer("Сначала подключи бота к аккаунту — инструкция в /adm.")
+        return True
+    if not username:
+        await message.answer("Укажи получателя: «напиши @username «текст сообщения»».")
+        return True
+
+    target = await resolve_peer(message, username)
+    if target is None:
+        await message.answer(
+            f"Не нашёл @{username}. Я вижу только тех, с кем переписка была после подключения бота."
+        )
+        return True
+
+    cid, peer_id = target
+    try:
+        await message.bot.send_message(
+            chat_id=peer_id,
+            text=text + BUSINESS_SIGNATURE,
+            business_connection_id=cid,
+        )
+    except Exception as exc:
+        log.exception("Не удалось отправить от лица аккаунта")
+        await message.answer(
+            f"Не получилось отправить: {type(exc).__name__}. Проверь права подключения в /adm."
+        )
+        return True
+
+    await message.answer(f"✅ Отправил @{username} от твоего лица с подписью «нейросеть».")
+    return True
+
+
+async def business_profile(message: Message, username: str) -> bool:
+    conn = active_connection()
+    if conn is None:
+        await message.answer("Сначала подключи бота к аккаунту — инструкция в /adm.")
+        return True
+
+    target = await resolve_peer(message, username)
+    if target is None:
+        await message.answer(f"Про @{username} данных нет: переписку я вижу только с момента подключения.")
+        return True
+
+    cid, peer_id = target
+    items = business_history.get(cid, {}).get(peer_id, [])
+    if len(items) < 3:
+        await message.answer(
+            f"С @{username} всего {len(items)} сообщ. — этого мало для анализа. "
+            "Пусть переписка немного накопится, потом спроси снова."
+        )
+        return True
+
+    digest = "\n".join(
+        ("Я: " if item["me"] else "Собеседник: ") + item["text"].replace("\n", " ") for item in items[-60:]
+    )
+    parts = [types.Part.from_text(text=f"Переписка с @{username}:\n\n{digest}")]
+    thinking = await message.reply("🧠 Читаю переписку…")
+    try:
+        text = await asyncio.to_thread(ask_model, parts, [], PROFILE_INSTRUCTION)
+    except Exception:
+        log.exception("Ошибка анализа переписки")
+        await thinking.delete()
+        await message.answer("Не получилось разобрать переписку, попробуй ещё раз чуть позже.")
+        return True
+
+    await thinking.delete()
+    for chunk in split_text(text):
+        await message.reply(to_html(chunk), parse_mode="HTML")
+    return True
+
+
+async def try_business_intent(message: Message, text: str) -> bool:
+    if not is_admin(message):
+        return False
+
+    low = text.lower()
+    username_match = re.search(r"@([A-Za-z0-9_]{4,64})", text)
+    quote_match = re.search(r"[«\"“„']([^«»\"“”„']{1,1000})[»\"“”„']", text, re.S)
+    wants_send = re.search(r"\b(напиши|написать|отправь|отправить|скажи|передай)\b", low)
+    wants_profile = re.search(r"(расскажи|кто\s+это|что\s+за|проанализируй|вайб|тон|отношен|о\s+человеке)", low)
+
+    if wants_send and quote_match:
+        username = username_match.group(1) if username_match else None
+        return await business_send(message, username, quote_match.group(1).strip())
+
+    if username_match and (wants_profile or low.strip() == f"@{username_match.group(1).lower()}"):
+        return await business_profile(message, username_match.group(1))
+
+    return False
+
 
 def users_report() -> list[str]:
     if not users:
@@ -438,166 +702,8 @@ async def answer(message: Message, parts: list, user_text: str) -> None:
 async def cmd_start(message: Message) -> None:
     if not await require_subscription(message):
         return
-    await message.answer(
-        "👋 Привет! Я A-Gamma — нейросеть, разработанная Laki Good, на синтаксисе Diana Lovis.\n\n"
-        "💬 Могу поболтать на любую тему — от учёбы и техники до фильмов и планов.\n"
-        "📸 А если пришлёшь фото задачи, разберу её по шагам и дам ответ ✨\n\n"
-        "Просто напиши что-нибудь 😊\n\n"
-        "⚙️ Два режима работы:\n"
-        "😌 Спокойный — включён сейчас, по умолчанию\n"
-        "😈 Агрессивный — /dir\n"
-        "🔙 Вернуть спокойный — /andir"
-    )
 
-
-@dp.message(Command("vopros"))
-async def cmd_vopros(message: Message) -> None:
-    await message.answer(
-        "👋 Я бот Gamma, созданный Laki Good под руководством Zyza.\n\n"
-        "🤖 Я новая версия своей устаревшей версии Gramrey. Отвечаю на твои вопросы, "
-        "могу прочитать текст и задачу с картинки. 📸 Но пока что не могу отправить фото "
-        "или картинку — ответ над этим уже работают. 🛠\n\n"
-        "Сделан я на синтаксисе DianaLovi ❤️ — любимом одноимённом синтаксисе Zyza. "
-        "Каждый день стараюсь развиваться и становиться лучше. 🚀\n\n"
-        "Спасибо, что выбрал именно меня! 🙏\n\n"
-        "✍️ Напиши свой вопрос или отправь картинку с просьбой или заданием."
-    )
-
-
-@dp.message(Command("dir"))
-async def cmd_dir(message: Message) -> None:
-    user_mode[message.from_user.id] = "aggro"
-    history.pop(message.from_user.id, None)
-    await message.answer(
-        "😈 Режим переключён: теперь я в агрессивном режиме — отвечаю резко, язвительно и без церемоний.\n\n"
-        "🔙 Чтобы вернуть обычный спокойный режим, отправь /andir"
-    )
-
-
-@dp.message(Command("andir"))
-async def cmd_andir(message: Message) -> None:
-    user_mode[message.from_user.id] = "normal"
-    history.pop(message.from_user.id, None)
-    await message.answer(
-        "😌 Режим переключён: снова обычный, спокойный и дружелюбный A-Gamma.\n\n"
-        "🔁 Чтобы снова включить агрессивный режим, отправь /dir"
-    )
-
-
-@dp.message(Command("reset"))
-async def cmd_reset(message: Message) -> None:
-    history.pop(message.from_user.id, None)
-    await message.answer("🧹 Память диалога очищена. Начинаем с чистого листа.")
-
-
-@dp.message(Command("help"))
-async def cmd_help(message: Message) -> None:
-    await message.answer(
-        "Как пользоваться:\n"
-        "1. 💬 Просто общайся — отвечу на любой вопрос и поддержу разговор.\n"
-        "2. 📸 Отправь фото задания — решу по шагам и дам ответ.\n"
-        "3. 📎 Фото как файл (без сжатия) — качество распознавания выше.\n"
-        "4. 🧹 /reset — очистить память диалога и начать заново.\n"
-        "5. 😈 /dir — агрессивный режим, 🔙 /andir — вернуть спокойный.\n"
-        "6. 📖 /vopros — расскажу о себе.\n\n"
-        f"Я помню последние {HISTORY_TURNS} сообщений. "
-        f"Ограничения: не больше {MAX_IMAGE_MB} МБ на изображение, "
-        f"один запрос в {COOLDOWN_SECONDS} сек."
-    )
-
-
-@dp.message(F.photo)
-async def on_photo(message: Message) -> None:
-    if not await require_subscription(message):
-        return
-    photo = message.photo[-1]
-    if photo.file_size and photo.file_size > MAX_IMAGE_MB * 1024 * 1024:
-        await message.reply(f"Фото больше {MAX_IMAGE_MB} МБ. Пришли, пожалуйста, поменьше.")
-        return
-
-    buffer = io.BytesIO()
-    await message.bot.download(photo, destination=buffer)
-    image_part = types.Part.from_bytes(data=buffer.getvalue(), mime_type="image/jpeg")
-    caption = (message.caption or "Реши задание с фотографии.").strip()
-    await answer(message, [image_part, types.Part.from_text(text=caption)], f"[фото] {caption}")
-
-
-@dp.message(F.document)
-async def on_document(message: Message) -> None:
-    if not await require_subscription(message):
-        return
-    doc = message.document
-    mime = (doc.mime_type or "").lower()
-    if mime not in {"image/jpeg", "image/png", "image/webp"}:
-        await message.reply("Пока принимаю только фото: JPEG, PNG или WEBP.")
-        return
-    if doc.file_size and doc.file_size > MAX_IMAGE_MB * 1024 * 1024:
-        await message.reply(f"Файл больше {MAX_IMAGE_MB} МБ. Пришли, пожалуйста, поменьше.")
-        return
-
-    buffer = io.BytesIO()
-    await message.bot.download(doc, destination=buffer)
-    image_part = types.Part.from_bytes(data=buffer.getvalue(), mime_type=mime)
-    caption = (message.caption or "Реши задание с фотографии.").strip()
-    await answer(message, [image_part, types.Part.from_text(text=caption)], f"[фото] {caption}")
-
-
-@dp.message(Command("users"))
-async def cmd_users(message: Message) -> None:
-    if not is_admin(message):
-        await message.answer("Эта команда только для администратора.")
-        return
-    report = "\n".join(users_report())
-    for chunk in split_text(report):
-        await message.answer(chunk)
-
-
-@dp.message(Command("broadcast"))
-async def cmd_broadcast(message: Message) -> None:
-    if not is_admin(message):
-        await message.answer("Эта команда только для администратора.")
-        return
-    text = (message.text or "").partition(" ")[2].strip()
-    if not text:
-        await message.answer("Напиши так: /broadcast ваш текст сообщения")
-        return
-    ok, failed = await broadcast(message.bot, text)
-    await message.answer(f"📣 Отправлено: {ok}. Не дошло: {failed}.")
-
-
-@dp.message(Command("tech"))
-async def cmd_tech(message: Message) -> None:
-    if not is_admin(message):
-        await message.answer("Эта команда только для администратора.")
-        return
-    file_path = os.path.abspath(__file__)
-    with open(file_path, "r", encoding="utf-8") as f:
-        lines = sum(1 for _ in f)
-    size_kb = round(os.path.getsize(file_path) / 1024, 1)
-    uptime = datetime.now(timezone.utc) - STARTED_AT
-    await message.answer(
-        "🛠 Техническая часть A-Gamma\n\n"
-        f"Версия бота: {BOT_VERSION}\n"
-        f"Написано: Python {os.sys.version.split()[0]}\n"
-        f"Библиотеки: aiogram (Telegram), google-genai (Gemini), aiohttp\n"
-        f"Модели: {', '.join(MODELS)}\n"
-        f"Код: bot.py — {lines} строк, {size_kb} КБ\n"
-        f"Запущен: {STARTED_AT.strftime('%Y-%m-%d %H:%M UTC')}\n"
-        f"Аптайм: {uptime.days} д {uptime.seconds // 3600} ч {uptime.seconds % 3600 // 60} мин\n"
-        f"Хостинг: GitHub Actions (перезапуск каждые 6 часов)\n"
-        f"Пользователей в базе: {len(users)}"
-    )
-
-
-@dp.message(F.text)
-async def on_text(message: Message) -> None:
-    text = message.text.strip()
-    if not text:
-        return
-    if not await require_subscription(message):
-        return
-    if len(text) > 6000:
-        await message.reply("Слишком длинное сообщение, сократи, пожалуйста, до 6000 символов.")
+    if await try_business_intent(message, text):
         return
 
     if is_admin(message):
