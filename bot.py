@@ -355,6 +355,7 @@ async def on_check_subscription(callback: CallbackQuery) -> None:
     await callback.answer("Готово")
 
 
+
 # ---------- Telegram Business: работа от лица подключённого аккаунта ----------
 
 business_connections: dict[str, dict] = {}
@@ -702,8 +703,170 @@ async def answer(message: Message, parts: list, user_text: str) -> None:
 async def cmd_start(message: Message) -> None:
     if not await require_subscription(message):
         return
+    await message.answer(
+        "👋 Привет! Я A-Gamma — нейросеть, разработанная Laki Good, на синтаксисе Diana Lovis.\n\n"
+        "💬 Могу поболтать на любую тему — от учёбы и техники до фильмов и планов.\n"
+        "📸 А если пришлёшь фото задачи, разберу её по шагам и дам ответ ✨\n\n"
+        "Просто напиши что-нибудь 😊\n\n"
+        "⚙️ Два режима работы:\n"
+        "😌 Спокойный — включён сейчас, по умолчанию\n"
+        "😈 Агрессивный — /dir\n"
+        "🔙 Вернуть спокойный — /andir"
+    )
+
+
+@dp.message(Command("vopros"))
+async def cmd_vopros(message: Message) -> None:
+    await message.answer(
+        "👋 Я бот Gamma, созданный Laki Good под руководством Zyza.\n\n"
+        "🤖 Я новая версия своей устаревшей версии Gramrey. Отвечаю на твои вопросы, "
+        "могу прочитать текст и задачу с картинки. 📸 Но пока что не могу отправить фото "
+        "или картинку — ответ над этим уже работают. 🛠\n\n"
+        "Сделан я на синтаксисе DianaLovi ❤️ — любимом одноимённом синтаксисе Zyza. "
+        "Каждый день стараюсь развиваться и становиться лучше. 🚀\n\n"
+        "Спасибо, что выбрал именно меня! 🙏\n\n"
+        "✍️ Напиши свой вопрос или отправь картинку с просьбой или заданием."
+    )
+
+
+@dp.message(Command("dir"))
+async def cmd_dir(message: Message) -> None:
+    user_mode[message.from_user.id] = "aggro"
+    history.pop(message.from_user.id, None)
+    await message.answer(
+        "😈 Режим переключён: теперь я в агрессивном режиме — отвечаю резко, язвительно и без церемоний.\n\n"
+        "🔙 Чтобы вернуть обычный спокойный режим, отправь /andir"
+    )
+
+
+@dp.message(Command("andir"))
+async def cmd_andir(message: Message) -> None:
+    user_mode[message.from_user.id] = "normal"
+    history.pop(message.from_user.id, None)
+    await message.answer(
+        "😌 Режим переключён: снова обычный, спокойный и дружелюбный A-Gamma.\n\n"
+        "🔁 Чтобы снова включить агрессивный режим, отправь /dir"
+    )
+
+
+@dp.message(Command("reset"))
+async def cmd_reset(message: Message) -> None:
+    history.pop(message.from_user.id, None)
+    await message.answer("🧹 Память диалога очищена. Начинаем с чистого листа.")
+
+
+@dp.message(Command("help"))
+async def cmd_help(message: Message) -> None:
+    await message.answer(
+        "Как пользоваться:\n"
+        "1. 💬 Просто общайся — отвечу на любой вопрос и поддержу разговор.\n"
+        "2. 📸 Отправь фото задания — решу по шагам и дам ответ.\n"
+        "3. 📎 Фото как файл (без сжатия) — качество распознавания выше.\n"
+        "4. 🧹 /reset — очистить память диалога и начать заново.\n"
+        "5. 😈 /dir — агрессивный режим, 🔙 /andir — вернуть спокойный.\n"
+        "6. 📖 /vopros — расскажу о себе.\n\n"
+        f"Я помню последние {HISTORY_TURNS} сообщений. "
+        f"Ограничения: не больше {MAX_IMAGE_MB} МБ на изображение, "
+        f"один запрос в {COOLDOWN_SECONDS} сек."
+    )
+
+
+@dp.message(F.photo)
+async def on_photo(message: Message) -> None:
+    if not await require_subscription(message):
+        return
+    photo = message.photo[-1]
+    if photo.file_size and photo.file_size > MAX_IMAGE_MB * 1024 * 1024:
+        await message.reply(f"Фото больше {MAX_IMAGE_MB} МБ. Пришли, пожалуйста, поменьше.")
+        return
+
+    buffer = io.BytesIO()
+    await message.bot.download(photo, destination=buffer)
+    image_part = types.Part.from_bytes(data=buffer.getvalue(), mime_type="image/jpeg")
+    caption = (message.caption or "Реши задание с фотографии.").strip()
+    await answer(message, [image_part, types.Part.from_text(text=caption)], f"[фото] {caption}")
+
+
+@dp.message(F.document)
+async def on_document(message: Message) -> None:
+    if not await require_subscription(message):
+        return
+    doc = message.document
+    mime = (doc.mime_type or "").lower()
+    if mime not in {"image/jpeg", "image/png", "image/webp"}:
+        await message.reply("Пока принимаю только фото: JPEG, PNG или WEBP.")
+        return
+    if doc.file_size and doc.file_size > MAX_IMAGE_MB * 1024 * 1024:
+        await message.reply(f"Файл больше {MAX_IMAGE_MB} МБ. Пришли, пожалуйста, поменьше.")
+        return
+
+    buffer = io.BytesIO()
+    await message.bot.download(doc, destination=buffer)
+    image_part = types.Part.from_bytes(data=buffer.getvalue(), mime_type=mime)
+    caption = (message.caption or "Реши задание с фотографии.").strip()
+    await answer(message, [image_part, types.Part.from_text(text=caption)], f"[фото] {caption}")
+
+
+@dp.message(Command("users"))
+async def cmd_users(message: Message) -> None:
+    if not is_admin(message):
+        await message.answer("Эта команда только для администратора.")
+        return
+    report = "\n".join(users_report())
+    for chunk in split_text(report):
+        await message.answer(chunk)
+
+
+@dp.message(Command("broadcast"))
+async def cmd_broadcast(message: Message) -> None:
+    if not is_admin(message):
+        await message.answer("Эта команда только для администратора.")
+        return
+    text = (message.text or "").partition(" ")[2].strip()
+    if not text:
+        await message.answer("Напиши так: /broadcast ваш текст сообщения")
+        return
+    ok, failed = await broadcast(message.bot, text)
+    await message.answer(f"📣 Отправлено: {ok}. Не дошло: {failed}.")
+
+
+@dp.message(Command("tech"))
+async def cmd_tech(message: Message) -> None:
+    if not is_admin(message):
+        await message.answer("Эта команда только для администратора.")
+        return
+    file_path = os.path.abspath(__file__)
+    with open(file_path, "r", encoding="utf-8") as f:
+        lines = sum(1 for _ in f)
+    size_kb = round(os.path.getsize(file_path) / 1024, 1)
+    uptime = datetime.now(timezone.utc) - STARTED_AT
+    await message.answer(
+        "🛠 Техническая часть A-Gamma\n\n"
+        f"Версия бота: {BOT_VERSION}\n"
+        f"Написано: Python {os.sys.version.split()[0]}\n"
+        f"Библиотеки: aiogram (Telegram), google-genai (Gemini), aiohttp\n"
+        f"Модели: {', '.join(MODELS)}\n"
+        f"Код: bot.py — {lines} строк, {size_kb} КБ\n"
+        f"Запущен: {STARTED_AT.strftime('%Y-%m-%d %H:%M UTC')}\n"
+        f"Аптайм: {uptime.days} д {uptime.seconds // 3600} ч {uptime.seconds % 3600 // 60} мин\n"
+        f"Хостинг: GitHub Actions (перезапуск каждые 6 часов)\n"
+        f"Пользователей в базе: {len(users)}"
+    )
+
+
+@dp.message(F.text)
+async def on_text(message: Message) -> None:
+    text = message.text.strip()
+    if not text:
+        return
+    if not await require_subscription(message):
+        return
 
     if await try_business_intent(message, text):
+        return
+
+    if len(text) > 6000:
+        await message.reply("Слишком длинное сообщение, сократи, пожалуйста, до 6000 символов.")
         return
 
     if is_admin(message):

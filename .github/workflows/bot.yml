@@ -43,6 +43,21 @@ jobs:
           print("token ok:", data.get("ok"), "bot:", data.get("result", {}).get("username"))
           PY
 
+      - name: Smoke check
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python - <<'PY'
+          import bot
+          names = {h.callback.__name__ for h in bot.dp.message.handlers}
+          need = {"cmd_start", "on_text", "on_photo", "on_document", "cmd_help", "cmd_adm"}
+          missing = need - names
+          assert not missing, f"нет обработчиков: {sorted(missing)}"
+          assert len(bot.dp.business_message.handlers) == 1, "нет бизнес-обработчика"
+          print("smoke ok:", bot.BOT_VERSION, sorted(names))
+          PY
+
       - name: Run bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
