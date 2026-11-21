@@ -130,7 +130,7 @@ dp = Dispatcher()
 last_request: dict[int, float] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.13.0"
+BOT_VERSION = "1.14.0"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -487,17 +487,13 @@ def has_owner_access(user_id: int) -> bool:
 
 
 def connections_for(user_id: int) -> dict[str, dict]:
-    shared = os.getenv("SHARED_DB", "1") != "0"
-    if shared:
-        return store.connections()
-
     result: dict[str, dict] = {}
     privileged = has_owner_access(user_id)
     for cid, info in store.connections().items():
         owner = connection_owner(info)
         if owner == user_id:
             result[cid] = info
-        elif privileged and (owner is None or owner == ADMIN_ID):
+        elif privileged and owner in (None, ADMIN_ID):
             result[cid] = info
     return result
 
@@ -518,6 +514,21 @@ def active_connection(user_id: int) -> tuple[str, dict] | None:
     return None
 
 
+def shared_note(user_id: int) -> str:
+    others = [
+        info
+        for cid, info in store.connections().items()
+        if connection_owner(info) not in (user_id, None)
+    ]
+    if not others:
+        return ""
+    names = ", ".join("@" + (i.get("username") or i.get("name") or "аккаунт") for i in others)
+    return (
+        f"\n\n📚 В общей базе есть подключённые аккаунты: {names}. "
+        "Их чаты я читаю и разбираю — спроси «расскажи о @юзернейм»."
+    )
+
+
 def business_status_text(user_id: int) -> str:
     connections = connections_for(user_id)
     if not connections:
@@ -536,6 +547,7 @@ def business_status_text(user_id: int) -> str:
             "• «расскажи о @username» — разберу переписку и тон общения\n\n"
             "Если бот подключён к другому твоему аккаунту, открой доступ к архиву:\n"
             "/owner код — код выдаёт владелец в /adm."
+            + shared_note(user_id)
         )
 
     lines = ["✅ Бот подключён к аккаунту — можно работать.", ""]
@@ -563,6 +575,14 @@ def business_status_text(user_id: int) -> str:
     ]
     if store.is_viewer(user_id):
         lines.append("👀 Доступ к архиву владельца открыт: можно смотреть его чаты.")
+    others = [
+        info
+        for cid, info in store.connections().items()
+        if connection_owner(info) not in (user_id, None) and cid not in connections
+    ]
+    if others:
+        names = ", ".join("@" + (i.get("username") or i.get("name") or "аккаунт") for i in others)
+        lines.append(f"📚 В общей базе есть другие подключённые аккаунты: {names}. Их чаты тоже можно разобрать.")
     return "\n".join(lines)
 
 
@@ -920,10 +940,7 @@ def blocks_for_connections(cids, limit_peers: int = 8, per_peer: int = 30) -> li
 
 
 def relationship_blocks(user_id: int, limit_peers: int = 8, per_peer: int = 30) -> list[str]:
-    own = connections_owned_by(user_id)
-    if own:
-        return blocks_for_connections(list(own), limit_peers, per_peer)
-    return blocks_for_connections(list(connections_for(user_id)), limit_peers, per_peer)
+    return blocks_for_connections(list(store.connections()), limit_peers, per_peer)
 
 
 async def try_business_intent(message: Message, text: str) -> bool:
