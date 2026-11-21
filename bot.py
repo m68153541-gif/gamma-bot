@@ -130,7 +130,7 @@ dp = Dispatcher()
 last_request: dict[int, float] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.12.0"
+BOT_VERSION = "1.13.0"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -741,23 +741,14 @@ async def business_send(message: Message, username: str | None, text: str) -> bo
     return True
 
 
-async def business_profile(message: Message, username: str) -> bool:
-    conn = active_connection(message.from_user.id)
-    if conn is None:
-        await message.answer("Сначала подключи бота к аккаунту — инструкция в /adm.")
-        return True
-
-    target = await resolve_peer(message, username)
-    if target is None:
-        await message.answer(f"Про @{username} данных нет: переписку я вижу только с момента подключения.")
-        return True
-
-    cid, peer_id = target
-    items = store.peer_messages(cid, peer_id, BUSINESS_KEEP)
+async def show_chat(
+    message: Message, cid: str, chat_id: int, peer_name: str, account: str | None = None
+) -> bool:
+    items = store.peer_messages(cid, chat_id, BUSINESS_KEEP)
     if len(items) < 3:
         await message.answer(
-            f"С @{username} всего {len(items)} сообщ. — этого мало для анализа. "
-            "Пусть переписка немного накопится, потом спроси снова."
+            f"В базе всего {len(items)} сообщ. по этому чату — мало для разбора. "
+            "Пусть переписка накопится."
         )
         return True
 
@@ -765,7 +756,8 @@ async def business_profile(message: Message, username: str) -> bool:
         ("Я: " if item["role"] == "me" else "Собеседник: ") + item["text"].replace("\n", " ")
         for item in items[-60:]
     )
-    parts = [types.Part.from_text(text=f"Переписка с @{username}:\n\n{digest}")]
+    header = f"Переписка с @{peer_name}" + (f" (аккаунт @{account})" if account else "")
+    parts = [types.Part.from_text(text=f"{header}:\n\n{digest}")]
     thinking = await message.reply("🧠 Читаю переписку…")
     try:
         text = await asyncio.to_thread(ask_model, parts, [], PROFILE_INSTRUCTION)
@@ -788,6 +780,16 @@ def peer_digest(cid: str, chat_id: int, limit: int = 40) -> str:
     )
 
 
+ACCOUNT_INSTRUCTION = (
+    "Ты разбираешь подключённый к боту аккаунт Telegram по фрагментам его переписок. "
+    "Опиши: 1) чем занимается владелец аккаунта и что ему важно; 2) какие темы и стиль общения; "
+    "3) с кем общается и как к нему относятся — друг, коллега, тёплое или натянутое общение; "
+    "4) кто, похоже, влюблён, кто держится холодно, кто давит и потенциально опасен — "
+    "с обоснованием из реплик. Догадки помечай словом «похоже», фактов не выдумывай. "
+    "Списком, живо, с эмодзи."
+)
+
+
 PAIR_INSTRUCTION = (
     "Ты разбираешь личную переписку владельца аккаунта с несколькими людьми. По фрагментам чатов "
     "сравни собеседников между собой: чем они отличаются по манере общения, кто к тебе теплее, "
@@ -798,57 +800,111 @@ PAIR_INSTRUCTION = (
 )
 
 
-async def pair_profile(message: Message, names: list[str]) -> bool:
-    user_id = message.from_user.id
-    if active_connection(user_id) is None:
-        await message.answer("Сначала подключи бота к аккаунту — инструкция в /adm.")
-        return True
+def connections_owned_by(user_id: int) -> dict[str, dict]:
+    return {
+        cid: info
+        for cid, info in store.connections().items()
+        if connection_owner(info) == user_id
+    }
 
-    own = owner_usernames(user_id)
-    peers = [n for n in names if n.lower() not in own]
-    if not peers:
-        await message.answer(
-            "Это юзернейм самого аккаунта. Назови собеседника, "
-            "например: «расскажи о чате с @friend»."
-        )
-        return True
 
-    blocks, found = [], []
-    for name in peers:
-        target = await resolve_peer(message, name)
-        if target is None:
-            continue
-        digest = peer_digest(target[0], target[1])
-        if digest:
-            blocks.append(f"=== чат с @{name} ===\n{digest}")
-            found.append(name)
+def connections_with_username(username: str) -> list[str]:
+    low = username.lower()
+    return [
+        cid
+        for cid, info in store.connections().items()
+        if (info.get("username") or "").lower() == low
+    ]
 
+
+def account_username(cid: str) -> str:
+    info = store.connections().get(cid) or {}
+    return info.get("username") or info.get("name") or "аккаунт"
+
+
+async def describe_account(message: Message, cids: list[str], username: str) -> bool:
+    blocks = blocks_for_connections(cids)
     if not blocks:
-        await message.answer(
-            "Переписку с этими людьми не нашёл в базе: бот видит только те чаты, "
-            "которые были после подключения."
-        )
+        await message.answer(f"У @{username} в базе пока нет чатов — нечего разбирать.")
         return True
-
-    parts = [types.Part.from_text(text="\n\n".join(blocks)[-14000:])]
-    thinking = await message.reply(f"🧠 Сравниваю {', '.join('@' + n for n in found)}…")
+    parts = [types.Part.from_text(text="\n\n".join(blocks)[-16000:])]
+    thinking = await message.reply(f"🧠 Смотрю переписки аккаунта @{username}…")
     try:
-        text = await asyncio.to_thread(ask_model, parts, [], PAIR_INSTRUCTION)
+        text = await asyncio.to_thread(ask_model, parts, [], ACCOUNT_INSTRUCTION)
     except Exception:
-        log.exception("Ошибка сравнения переписок")
+        log.exception("Ошибка разбора аккаунта")
         await thinking.delete()
-        await message.answer("Не получилось сравнить, попробуй ещё раз чуть позже.")
+        await message.answer("Не получилось разобрать аккаунт, попробуй позже.")
         return True
-
     await thinking.delete()
     for chunk in split_text(text):
         await message.reply(to_html(chunk), parse_mode="HTML")
     return True
 
 
-def relationship_blocks(user_id: int, limit_peers: int = 8, per_peer: int = 30) -> list[str]:
+async def chat_report(message: Message, names: list[str], text: str) -> bool:
+    user_id = message.from_user.id
+    conns = store.connections()
+    if not conns:
+        await message.answer("Бот пока не подключён ни к одному аккаунту — напиши /adm.")
+        return True
+
+    wants_my = bool(re.search(r"(?i)(мой чат|моём|моем|со мной|с моим|моего чата|мою переписк|моего аккаунта)", text))
+
+    # 1) «мой чат с @user»
+    if len(names) == 1 and wants_my:
+        own = connections_owned_by(user_id)
+        if not own:
+            await message.answer(
+                "У этого аккаунта нет подключения к боту, так что личного чата здесь нет. "
+                "Подключись через /adm или укажи оба юзернейма: «расскажи о чате @a и @b»."
+            )
+            return True
+        target = store.peer_by_username(names[0], list(own))
+        if target is None:
+            await message.answer(f"Чата с @{names[0]} у твоего аккаунта в базе нет.")
+            return True
+        return await show_chat(message, target[0], target[1], names[0])
+
+    # 2) чат между двумя аккаунтами
+    if len(names) >= 2:
+        first, second = names[0], names[1]
+        for account, peer in ((first, second), (second, first)):
+            cids = connections_with_username(account)
+            if not cids:
+                continue
+            target = store.peer_by_username(peer, cids)
+            if target is None:
+                await message.answer(
+                    f"Переписки @{account} ↔ @{peer} в базе нет: бот не видел между ними сообщений."
+                )
+                return True
+            return await show_chat(message, target[0], target[1], peer, account=account)
+        await message.answer(
+            "Ни один из этих аккаунтов не подключён к боту, поэтому их переписку я не видел. "
+            "Подключи нужный в /adm."
+        )
+        return True
+
+    # 3) один юзернейм: аккаунт или человек
+    name = names[0]
+    cids = connections_with_username(name)
+    if cids:
+        return await describe_account(message, cids, name)
+
+    own = connections_owned_by(user_id)
+    for cid in list(own) + [c for c in conns if c not in own]:
+        target = store.peer_by_username(name, [cid])
+        if target:
+            return await show_chat(message, cid, target[1], name)
+
+    await message.answer(f"Про @{name} в базе пусто — переписки с ним я не видел.")
+    return True
+
+
+def blocks_for_connections(cids, limit_peers: int = 8, per_peer: int = 30) -> list[str]:
     blocks: list[str] = []
-    for cid in connections_for(user_id):
+    for cid in cids:
         peers = store.peers(cid)
         ranked = sorted(
             peers.items(),
@@ -861,6 +917,13 @@ def relationship_blocks(user_id: int, limit_peers: int = 8, per_peer: int = 30) 
                 who = info.get("username") or info.get("name") or str(chat_id)
                 blocks.append(f"=== @{who} ===\n{digest}")
     return blocks
+
+
+def relationship_blocks(user_id: int, limit_peers: int = 8, per_peer: int = 30) -> list[str]:
+    own = connections_owned_by(user_id)
+    if own:
+        return blocks_for_connections(list(own), limit_peers, per_peer)
+    return blocks_for_connections(list(connections_for(user_id)), limit_peers, per_peer)
 
 
 async def try_business_intent(message: Message, text: str) -> bool:
@@ -878,11 +941,8 @@ async def try_business_intent(message: Message, text: str) -> bool:
         username = username_match.group(1) if username_match else None
         return await business_send(message, username, quote_match.group(1).strip())
 
-    if wants_profile and len(names) >= 2:
-        return await pair_profile(message, names[:3])
-
-    if username_match and (wants_profile or low.strip() == f"@{username_match.group(1).lower()}"):
-        return await business_profile(message, username_match.group(1))
+    if names and (wants_profile or low.strip().startswith("@")):
+        return await chat_report(message, names[:3], text)
 
     return False
 
