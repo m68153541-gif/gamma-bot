@@ -1,12 +1,14 @@
 import asyncio
 import html
 import io
+import json
 import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, BaseMiddleware, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatAction
 from aiogram.filters import Command, CommandStart
@@ -114,6 +116,59 @@ dp = Dispatcher()
 last_request: dict[int, float] = {}
 history: dict[int, list[types.Content]] = {}
 
+ADMIN_ID = 8513244807
+BOT_VERSION = "1.3.0"
+STARTED_AT = datetime.now(timezone.utc)
+USERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "users.json")
+users: dict[str, dict] = {}
+
+
+def load_users() -> None:
+    try:
+        with open(USERS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            users.update({str(k): v for k, v in data.items()})
+        log.info("Загружено пользователей: %s", len(users))
+    except FileNotFoundError:
+        log.info("users.json пока нет, начинаем с пустого списка")
+    except Exception:
+        log.exception("Не удалось прочитать users.json")
+
+
+def save_users() -> None:
+    try:
+        with open(USERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(users, f, ensure_ascii=False, indent=2)
+    except Exception:
+        log.exception("Не удалось сохранить users.json")
+
+
+def register_user(user, chat_id: int, username_hint: str = "") -> None:
+    if user is None:
+        return
+    key = str(user.id)
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    row = users.get(key)
+    if row is None:
+        users[key] = {
+            "id": user.id,
+            "chat_id": chat_id,
+            "username": user.username or username_hint or "",
+            "first_name": user.first_name or "",
+            "last_name": user.last_name or "",
+            "first_seen": now,
+            "last_seen": now,
+            "messages": 1,
+        }
+    else:
+        row["chat_id"] = chat_id
+        row["last_seen"] = now
+        row["messages"] = int(row.get("messages", 0)) + 1
+        if user.username:
+            row["username"] = user.username
+    save_users()
+
 
 def split_text(text: str, limit: int = TG_LIMIT) -> list[str]:
     chunks = []
@@ -194,6 +249,50 @@ def calm_names(text: str, force: bool = False) -> str:
     cleaned = re.sub(r"\s+([,.!?])", r"\1", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip() or text
+
+
+class UserTracker(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        if isinstance(event, Message) and event.from_user is not None:
+            try:
+                register_user(event.from_user, event.chat.id)
+            except Exception:
+                log.exception("Не удалось учесть пользователя")
+        return await handler(event, data)
+
+
+dp.message.middleware(UserTracker())
+
+
+def is_admin(message: Message) -> bool:
+    return message.from_user is not None and message.from_user.id == ADMIN_ID
+
+
+def users_report() -> list[str]:
+    if not users:
+        return ["Пока никто не писал боту."]
+    rows = sorted(users.values(), key=lambda r: int(r.get("messages", 0)), reverse=True)
+    lines = [f"👥 Пользователей: {len(rows)}", ""]
+    for i, r in enumerate(rows, 1):
+        uname = f"@{r['username']}" if r.get("username") else "без username"
+        name = " ".join(x for x in [r.get("first_name", ""), r.get("last_name", "")] if x).strip()
+        lines.append(
+            f"{i}. ID {r['id']} · {uname} · {name or 'без имени'} · "
+            f"{r.get('messages', 0)} сообщ. · впервые {r.get('first_seen', '?')[:16]}"
+        )
+    return lines
+
+
+async def broadcast(bot: Bot, text: str) -> tuple[int, int]:
+    ok, failed = 0, 0
+    for r in list(users.values()):
+        try:
+            await bot.send_message(chat_id=r["chat_id"], text=text)
+            ok += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.05)
+    return ok, failed
 
 
 def ask_model(parts: list, past: list[types.Content], instruction: str, guard: bool = False) -> str:
@@ -355,6 +454,53 @@ async def on_document(message: Message) -> None:
     await answer(message, [image_part, types.Part.from_text(text=caption)], f"[фото] {caption}")
 
 
+@dp.message(Command("users"))
+async def cmd_users(message: Message) -> None:
+    if not is_admin(message):
+        await message.answer("Эта команда только для администратора.")
+        return
+    report = "\n".join(users_report())
+    for chunk in split_text(report):
+        await message.answer(chunk)
+
+
+@dp.message(Command("broadcast"))
+async def cmd_broadcast(message: Message) -> None:
+    if not is_admin(message):
+        await message.answer("Эта команда только для администратора.")
+        return
+    text = (message.text or "").partition(" ")[2].strip()
+    if not text:
+        await message.answer("Напиши так: /broadcast ваш текст сообщения")
+        return
+    ok, failed = await broadcast(message.bot, text)
+    await message.answer(f"📣 Отправлено: {ok}. Не дошло: {failed}.")
+
+
+@dp.message(Command("tech"))
+async def cmd_tech(message: Message) -> None:
+    if not is_admin(message):
+        await message.answer("Эта команда только для администратора.")
+        return
+    file_path = os.path.abspath(__file__)
+    with open(file_path, "r", encoding="utf-8") as f:
+        lines = sum(1 for _ in f)
+    size_kb = round(os.path.getsize(file_path) / 1024, 1)
+    uptime = datetime.now(timezone.utc) - STARTED_AT
+    await message.answer(
+        "🛠 Техническая часть A-Gamma\n\n"
+        f"Версия бота: {BOT_VERSION}\n"
+        f"Написано: Python {os.sys.version.split()[0]}\n"
+        f"Библиотеки: aiogram (Telegram), google-genai (Gemini), aiohttp\n"
+        f"Модели: {', '.join(MODELS)}\n"
+        f"Код: bot.py — {lines} строк, {size_kb} КБ\n"
+        f"Запущен: {STARTED_AT.strftime('%Y-%m-%d %H:%M UTC')}\n"
+        f"Аптайм: {uptime.days} д {uptime.seconds // 3600} ч {uptime.seconds % 3600 // 60} мин\n"
+        f"Хостинг: GitHub Actions (перезапуск каждые 6 часов)\n"
+        f"Пользователей в базе: {len(users)}"
+    )
+
+
 @dp.message(F.text)
 async def on_text(message: Message) -> None:
     text = message.text.strip()
@@ -363,6 +509,31 @@ async def on_text(message: Message) -> None:
     if len(text) > 6000:
         await message.reply("Слишком длинное сообщение, сократи, пожалуйста, до 6000 символов.")
         return
+
+    if is_admin(message):
+        send_all = re.search(r"(?i)(?:напиши|отправь|разошли)\s+всем:?\s+(.+)", text, re.S)
+        if send_all:
+            ok, failed = await broadcast(message.bot, send_all.group(1).strip())
+            await message.answer(f"📣 Отправлено: {ok}. Не дошло: {failed}.")
+            return
+
+        wants_users = re.search(r"(?i)(пользовател|юзер)", text) and re.search(
+            r"(?i)(список|айди|\bid\b|всех|кто|покажи)", text
+        )
+        if wants_users:
+            report = "\n".join(users_report())
+            for chunk in split_text(report):
+                await message.answer(chunk)
+            return
+
+        wants_tech = re.search(
+            r"(?i)(на ч[её]м (ты )?написан|сколько строк|какая версия|техническ|тех\.? ?част|когда запущ)",
+            text,
+        )
+        if wants_tech:
+            await cmd_tech(message)
+            return
+
     await answer(message, [types.Part.from_text(text=text)], text)
 
 
