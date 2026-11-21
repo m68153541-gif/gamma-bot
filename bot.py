@@ -40,6 +40,7 @@ MODELS = [
 ]
 
 COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "5"))
+OWNER_CODE = os.getenv("OWNER_CODE", "").strip()
 MAX_IMAGE_MB = int(os.getenv("MAX_IMAGE_MB", "10"))
 HISTORY_TURNS = int(os.getenv("HISTORY_TURNS", "8"))
 TG_LIMIT = 4000
@@ -129,7 +130,7 @@ dp = Dispatcher()
 last_request: dict[int, float] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.10.0"
+BOT_VERSION = "1.11.0"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -481,13 +482,29 @@ def connection_owner(info: dict) -> int | None:
     return int(owner) if owner else None
 
 
+def has_owner_access(user_id: int) -> bool:
+    return user_id == ADMIN_ID or store.is_viewer(user_id)
+
+
 def connections_for(user_id: int) -> dict[str, dict]:
     result: dict[str, dict] = {}
+    privileged = has_owner_access(user_id)
     for cid, info in store.connections().items():
         owner = connection_owner(info)
-        if owner == user_id or (owner is None and user_id == ADMIN_ID):
+        if owner == user_id:
+            result[cid] = info
+        elif privileged and (owner is None or owner == ADMIN_ID):
             result[cid] = info
     return result
+
+
+def owner_usernames(user_id: int) -> set[str]:
+    names = set()
+    for info in connections_for(user_id).values():
+        name = (info.get("username") or "").strip().lower()
+        if name:
+            names.add(name)
+    return names
 
 
 def active_connection(user_id: int) -> tuple[str, dict] | None:
@@ -512,7 +529,9 @@ def business_status_text(user_id: int) -> str:
             "из входящего сообщения я тоже узнаю подключение.\n\n"
             "Дальше работают команды:\n"
             "• «напиши @username «текст»» — отправлю от твоего лица с подписью «нейросеть»\n"
-            "• «расскажи о @username» — разберу переписку и тон общения"
+            "• «расскажи о @username» — разберу переписку и тон общения\n\n"
+            "Если бот подключён к другому твоему аккаунту, открой доступ к архиву:\n"
+            "/owner код — код выдаёт владелец в /adm."
         )
 
     lines = ["✅ Бот подключён к аккаунту — можно работать.", ""]
@@ -538,6 +557,8 @@ def business_status_text(user_id: int) -> str:
         "",
         "База обновляется каждые 30 секунд и переживает перезапуски.",
     ]
+    if store.is_viewer(user_id):
+        lines.append("👀 Доступ к архиву владельца открыт: можно смотреть его чаты.")
     return "\n".join(lines)
 
 
@@ -562,6 +583,30 @@ async def on_adm_refresh(callback: CallbackQuery) -> None:
     if callback.message is not None:
         await callback.message.edit_text(business_status_text(callback.from_user.id))
     await callback.answer("Обновлено")
+
+
+@dp.message(Command("owner"))
+async def cmd_owner(message: Message) -> None:
+    if message.from_user is None:
+        return
+    code = (message.text or "").partition(" ")[2].strip()
+    if not OWNER_CODE:
+        await message.answer("Код доступа не настроен — попроси владельца задать OWNER_CODE.")
+        return
+    if not code:
+        await message.answer(
+            "Открой доступ к архиву владельца: /owner код\n"
+            "Код выдаёт владелец в /adm."
+        )
+        return
+    if code != OWNER_CODE:
+        await message.answer("Код не подошёл.")
+        return
+    store.add_viewer(message.from_user.id)
+    await message.answer(
+        "✅ Доступ открыт: этот аккаунт теперь видит архив переписок владельца.\n"
+        "Проверь /adm, а потом спрашивай «расскажи о @username»."
+    )
 
 
 SELF_PROFILE_INSTRUCTION = (
@@ -645,6 +690,9 @@ async def resolve_peer(message: Message, username: str) -> tuple[str, int] | Non
         chat = await message.bot.get_chat(f"@{username}")
     except Exception:
         return None
+    known = store.peer_by_chat(chat.id, list(connections_for(message.from_user.id)))
+    if known:
+        return known
     return conn[0], chat.id
 
 
@@ -740,22 +788,35 @@ PAIR_INSTRUCTION = (
 
 
 async def pair_profile(message: Message, names: list[str]) -> bool:
-    if active_connection(message.from_user.id) is None:
+    user_id = message.from_user.id
+    if active_connection(user_id) is None:
         await message.answer("Сначала подключи бота к аккаунту — инструкция в /adm.")
         return True
 
+    own = owner_usernames(user_id)
+    peers = [n for n in names if n.lower() not in own]
+    if not peers:
+        await message.answer(
+            "Это юзернейм самого аккаунта. Назови собеседника, "
+            "например: «расскажи о чате с @friend»."
+        )
+        return True
+
     blocks, found = [], []
-    for name in names:
-        target = find_peer(name, message.from_user.id)
+    for name in peers:
+        target = await resolve_peer(message, name)
         if target is None:
             continue
         digest = peer_digest(target[0], target[1])
         if digest:
-            blocks.append(f"=== @{name} ===\n{digest}")
+            blocks.append(f"=== чат с @{name} ===\n{digest}")
             found.append(name)
 
     if not blocks:
-        await message.answer("Не нашёл переписку с этими людьми в базе.")
+        await message.answer(
+            "Переписку с этими людьми не нашёл в базе: бот видит только те чаты, "
+            "которые были после подключения."
+        )
         return True
 
     parts = [types.Part.from_text(text="\n\n".join(blocks)[-14000:])]
@@ -992,7 +1053,8 @@ async def cmd_help(message: Message) -> None:
         "6. 📖 /vopros — расскажу о себе.\n"
         "7. 👤 /aboutme — расскажу, что я о тебе знаю по переписке.\n"
         "8. 🗑 /forget — удалить всё о тебе из базы насовсем.\n"
-        "9. 🔌 /adm — подключение к аккаунту и работа с личными чатами.\n\n"
+        "9. 🔌 /adm — подключение к аккаунту и работа с личными чатами.\n"
+        "10. 👀 /owner код — со второго аккаунта видеть архив владельца.\n\n"
         f"Для ответа беру последние {HISTORY_TURNS} сообщений, остальное лежит в базе. "
         f"Ограничения: не больше {MAX_IMAGE_MB} МБ на изображение, "
         f"один запрос в {COOLDOWN_SECONDS} сек."

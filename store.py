@@ -57,6 +57,10 @@ SCHEMA = [
     info TEXT NOT NULL,
     updated_at TEXT NOT NULL
 )""",
+    """CREATE TABLE IF NOT EXISTS viewers (
+    user_id INTEGER PRIMARY KEY,
+    added_at TEXT NOT NULL
+)""",
 ]
 
 
@@ -366,3 +370,21 @@ def save_touch() -> None:
             return
         conn = connect()
         conn.commit()
+
+def add_viewer(user_id: int) -> None:
+    _write(
+        "INSERT INTO viewers (user_id, added_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING",
+        (user_id, now_iso()),
+    )
+
+
+def is_viewer(user_id: int) -> bool:
+    return bool(_rows("SELECT user_id FROM viewers WHERE user_id = ?", (user_id,)))
+
+
+def peer_by_chat(chat_id: int, connection_ids: list[str] | None = None) -> tuple[str, int] | None:
+    for row in _rows("SELECT connection_id, chat_id FROM peers WHERE chat_id = ?", (chat_id,)):
+        if connection_ids is not None and row["connection_id"] not in connection_ids:
+            continue
+        return row["connection_id"], int(row["chat_id"])
+    return None
