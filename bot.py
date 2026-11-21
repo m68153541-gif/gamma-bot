@@ -129,7 +129,7 @@ dp = Dispatcher()
 last_request: dict[int, float] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.9.0"
+BOT_VERSION = "1.10.0"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -298,6 +298,9 @@ async def subscription_status(bot: Bot, user_id: int) -> bool | None:
     try:
         member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
     except TelegramBadRequest as exc:
+        text = str(exc).lower()
+        if "member not found" in text or "user not found" in text:
+            return False
         if not _gate_warned:
             _gate_warned = True
             log.warning(
@@ -414,7 +417,24 @@ async def remember_business_message(message: Message) -> None:
         return
     text = (message.text or message.caption or "").strip()
     if not text:
-        return
+        if message.photo:
+            text = "[фото]"
+        elif message.sticker:
+            text = "[стикер] " + (message.sticker.emoji or "")
+        elif message.voice:
+            text = "[голосовое]"
+        elif message.video_note:
+            text = "[кружок]"
+        elif message.video:
+            text = "[видео]"
+        elif message.audio:
+            text = "[аудио]"
+        elif message.document:
+            text = "[файл] " + (message.document.file_name or "")
+        elif message.location:
+            text = "[геолокация]"
+        else:
+            text = "[сообщение]"
 
     known = store.connections().get(cid)
     if known is None:
@@ -456,15 +476,29 @@ async def on_edited_business_message(message: Message) -> None:
     await remember_business_message(message)
 
 
-def active_connection() -> tuple[str, dict] | None:
+def connection_owner(info: dict) -> int | None:
+    owner = info.get("user_id")
+    return int(owner) if owner else None
+
+
+def connections_for(user_id: int) -> dict[str, dict]:
+    result: dict[str, dict] = {}
     for cid, info in store.connections().items():
+        owner = connection_owner(info)
+        if owner == user_id or (owner is None and user_id == ADMIN_ID):
+            result[cid] = info
+    return result
+
+
+def active_connection(user_id: int) -> tuple[str, dict] | None:
+    for cid, info in connections_for(user_id).items():
         if info.get("enabled"):
             return cid, info
     return None
 
 
-def business_status_text() -> str:
-    connections = store.connections()
+def business_status_text(user_id: int) -> str:
+    connections = connections_for(user_id)
     if not connections:
         return (
             "🔌 Подключения не вижу.\n\n"
@@ -486,7 +520,7 @@ def business_status_text() -> str:
         rights = info.get("rights") or {}
         state = "активно ✅" if info.get("enabled") else "отключено ⛔"
         peer_rows = store.peers(cid)
-        total = sum(len(store.peer_messages(cid, chat_id, 1000)) for chat_id in peer_rows)
+        total = sum(len(store.peer_messages(cid, chat_id, 2000)) for chat_id in peer_rows)
         lines += [
             "",
             f"• {info.get('name', '?')} @{info.get('username') or '—'} — {state}",
@@ -509,13 +543,12 @@ def business_status_text() -> str:
 
 @dp.message(Command("adm"))
 async def cmd_adm(message: Message) -> None:
-    if not is_admin(message):
-        await message.answer("Эта команда только для администратора.")
+    if message.from_user is None:
         return
-    for cid in list(store.connections()):
+    for cid in list(connections_for(message.from_user.id)):
         await refresh_connection(message.bot, cid)
     await message.answer(
-        business_status_text(),
+        business_status_text(message.from_user.id),
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="🔄 Обновить статус", callback_data="adm_refresh")]]
         ),
@@ -524,11 +557,10 @@ async def cmd_adm(message: Message) -> None:
 
 @dp.callback_query(F.data == "adm_refresh")
 async def on_adm_refresh(callback: CallbackQuery) -> None:
-    if callback.from_user.id != ADMIN_ID:
-        await callback.answer("Только для администратора", show_alert=True)
-        return
+    for cid in list(connections_for(callback.from_user.id)):
+        await refresh_connection(callback.bot, cid)
     if callback.message is not None:
-        await callback.message.edit_text(business_status_text())
+        await callback.message.edit_text(business_status_text(callback.from_user.id))
     await callback.answer("Обновлено")
 
 
@@ -560,7 +592,7 @@ async def self_profile(message: Message) -> bool:
     digest = "\n".join(
         ("Я: " if role == "model" else "Пользователь: ") + text.replace("\n", " ") for role, text in rows
     )[-12000:]
-    peers = relationship_blocks() if is_admin(message) else []
+    peers = relationship_blocks(user_id)
 
     if total < 2 and not peers:
         await message.answer(
@@ -598,15 +630,15 @@ async def self_profile(message: Message) -> bool:
     return True
 
 
-def find_peer(username: str) -> tuple[str, int] | None:
-    return store.peer_by_username(username)
+def find_peer(username: str, user_id: int) -> tuple[str, int] | None:
+    return store.peer_by_username(username, list(connections_for(user_id)))
 
 
 async def resolve_peer(message: Message, username: str) -> tuple[str, int] | None:
-    found = find_peer(username)
+    found = find_peer(username, message.from_user.id)
     if found:
         return found
-    conn = active_connection()
+    conn = active_connection(message.from_user.id)
     if conn is None:
         return None
     try:
@@ -617,7 +649,7 @@ async def resolve_peer(message: Message, username: str) -> tuple[str, int] | Non
 
 
 async def business_send(message: Message, username: str | None, text: str) -> bool:
-    conn = active_connection()
+    conn = active_connection(message.from_user.id)
     if conn is None:
         await message.answer("Сначала подключи бота к аккаунту — инструкция в /adm.")
         return True
@@ -651,7 +683,7 @@ async def business_send(message: Message, username: str | None, text: str) -> bo
 
 
 async def business_profile(message: Message, username: str) -> bool:
-    conn = active_connection()
+    conn = active_connection(message.from_user.id)
     if conn is None:
         await message.answer("Сначала подключи бота к аккаунту — инструкция в /adm.")
         return True
@@ -708,13 +740,13 @@ PAIR_INSTRUCTION = (
 
 
 async def pair_profile(message: Message, names: list[str]) -> bool:
-    if active_connection() is None:
+    if active_connection(message.from_user.id) is None:
         await message.answer("Сначала подключи бота к аккаунту — инструкция в /adm.")
         return True
 
     blocks, found = [], []
     for name in names:
-        target = find_peer(name)
+        target = find_peer(name, message.from_user.id)
         if target is None:
             continue
         digest = peer_digest(target[0], target[1])
@@ -742,9 +774,9 @@ async def pair_profile(message: Message, names: list[str]) -> bool:
     return True
 
 
-def relationship_blocks(limit_peers: int = 8, per_peer: int = 30) -> list[str]:
+def relationship_blocks(user_id: int, limit_peers: int = 8, per_peer: int = 30) -> list[str]:
     blocks: list[str] = []
-    for cid in store.connections():
+    for cid in connections_for(user_id):
         peers = store.peers(cid)
         ranked = sorted(
             peers.items(),
@@ -760,7 +792,7 @@ def relationship_blocks(limit_peers: int = 8, per_peer: int = 30) -> list[str]:
 
 
 async def try_business_intent(message: Message, text: str) -> bool:
-    if not is_admin(message):
+    if message.from_user is None:
         return False
 
     low = text.lower()
@@ -959,7 +991,8 @@ async def cmd_help(message: Message) -> None:
         "5. 😈 /dir — агрессивный режим, 🔙 /andir — вернуть спокойный.\n"
         "6. 📖 /vopros — расскажу о себе.\n"
         "7. 👤 /aboutme — расскажу, что я о тебе знаю по переписке.\n"
-        "8. 🗑 /forget — удалить всё о тебе из базы насовсем.\n\n"
+        "8. 🗑 /forget — удалить всё о тебе из базы насовсем.\n"
+        "9. 🔌 /adm — подключение к аккаунту и работа с личными чатами.\n\n"
         f"Для ответа беру последние {HISTORY_TURNS} сообщений, остальное лежит в базе. "
         f"Ограничения: не больше {MAX_IMAGE_MB} МБ на изображение, "
         f"один запрос в {COOLDOWN_SECONDS} сек."

@@ -343,9 +343,11 @@ def peers(connection_id: str) -> dict[int, dict]:
     }
 
 
-def peer_by_username(username: str) -> tuple[str, int] | None:
+def peer_by_username(username: str, connection_ids: list[str] | None = None) -> tuple[str, int] | None:
     low = username.lower()
     for row in _rows("SELECT connection_id, chat_id, username FROM peers WHERE lower(username) = ?", (low,)):
+        if connection_ids is not None and row["connection_id"] not in connection_ids:
+            continue
         return row["connection_id"], int(row["chat_id"])
     return None
 
