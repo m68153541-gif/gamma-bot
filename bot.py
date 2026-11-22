@@ -130,7 +130,7 @@ dp = Dispatcher()
 last_request: dict[int, float] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.15.0"
+BOT_VERSION = "1.16.0"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -546,59 +546,30 @@ def shared_note(user_id: int) -> str:
 
 def business_status_text(user_id: int) -> str:
     connections = connections_for(user_id)
-    if not connections:
-        return (
-            "🔌 Подключения не вижу.\n\n"
-            "Telegram присылает событие о подключении один раз — если оно случилось, "
-            "пока бот перезапускался, оно потерялось. Лечится так:\n\n"
-            "1️⃣ Нужен Telegram Premium — бизнес-боты работают только с ним.\n"
-            "2️⃣ Настройки → Telegram Business → Чат-боты → убрать @gamma_zyzabot из списка "
-            "и добавить заново, включив чтение личных чатов и ответы.\n"
-            "3️⃣ Снова отправь /adm — подключение подхватится.\n\n"
-            "Если не хочется трогать настройки: пусть кто-нибудь напишет тебе в личку — "
-            "из входящего сообщения я тоже узнаю подключение.\n\n"
-            "Дальше работают команды:\n"
-            "• «напиши @username «текст»» — отправлю от твоего лица с подписью «нейросеть»\n"
-            "• «расскажи о @username» — разберу переписку и тон общения\n\n"
-            "Если бот подключён к другому твоему аккаунту, открой доступ к архиву:\n"
-            "/owner код — код выдаёт владелец в /adm."
-            + shared_note(user_id)
+    active = any(info.get("enabled") for info in connections.values())
+
+    if active:
+        head = "✅ Подключение активно — можно работать."
+    else:
+        head = (
+            "🔌 Подключение не найдено.\n\n"
+            "Чтобы подключить: Настройки → Telegram Business → Чат-боты → @gamma_zyzabot "
+            "(нужен Telegram Premium), разреши чтение чатов и ответы, потом снова /adm."
         )
 
-    lines = ["✅ Бот подключён к аккаунту — можно работать.", ""]
-    for cid, info in connections.items():
-        rights = info.get("rights") or {}
-        state = "активно ✅" if info.get("enabled") else "отключено ⛔"
-        peer_rows = store.peers(cid)
-        total = sum(len(store.peer_messages(cid, chat_id, 2000)) for chat_id in peer_rows)
-        lines += [
+    return "\n".join(
+        [
+            head,
             "",
-            f"• {info.get('name', '?')} @{info.get('username') or '—'} — {state}",
-            f"  читает личные чаты: {'да' if rights.get('can_read_messages') else 'нет'}",
-            f"  может отвечать: {'да' if info.get('can_reply') else 'нет'}",
-            f"  чатов в базе: {len(peer_rows)} · сообщений: {total}",
+            "Что можно спросить:",
+            "• «расскажи обо мне» — что я о тебе знаю",
+            "• «расскажи о @username» — кто это и как к тебе относится",
+            "• «расскажи о чате @a и @b» — разберу переписку двух аккаунтов",
+            "• «напиши @username «текст»» — отправлю от твоего лица с подписью «🤖 нейросеть»",
+            "",
+            "Команды: /aboutme, /reset, /forget, /help",
         ]
-    lines += [
-        "",
-        "Что можно спросить:",
-        "• «напиши @username «текст»» — отправлю от твоего лица с подписью «🤖 нейросеть»",
-        "• «расскажи о @username» — кто он и как к тебе относится",
-        "• «расскажи о @a и @b» — сравню ваши чаты и скажу, кто ближе",
-        "• «расскажи обо мне» — личность, мои возможности и карта отношений",
-        "",
-        "База обновляется каждые 30 секунд и переживает перезапуски.",
-    ]
-    if store.is_viewer(user_id):
-        lines.append("👀 Доступ к архиву владельца открыт: можно смотреть его чаты.")
-    others = [
-        info
-        for cid, info in store.connections().items()
-        if connection_owner(info) not in (user_id, None) and cid not in connections
-    ]
-    if others:
-        names = ", ".join("@" + (i.get("username") or i.get("name") or "аккаунт") for i in others)
-        lines.append(f"📚 В общей базе есть другие подключённые аккаунты: {names}. Их чаты тоже можно разобрать.")
-    return "\n".join(lines)
+    )
 
 
 @dp.message(Command("adm"))
@@ -1050,28 +1021,24 @@ async def answer(message: Message, parts: list, user_text: str) -> None:
         return
     last_request[user_id] = now
 
+    mode, rows = store.prepare_answer(user_id, user_text, HISTORY_TURNS)
     past = [
         types.Content(role=role, parts=[types.Part.from_text(text=text)])
-        for role, text in store.context(user_id, HISTORY_TURNS)
+        for role, text in rows
         if role in {"user", "model"}
     ]
-    store.add_message("user", user_text, user_id=user_id)
+    instruction = SYSTEM_PROMPTS.get(mode, SYSTEM_PROMPT)
 
-    instruction = SYSTEM_PROMPTS.get(store.get_mode(user_id), SYSTEM_PROMPT)
-    thinking = await message.reply("🤔 Думаю…")
     await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
     try:
         text = await asyncio.to_thread(ask_model, parts, past, instruction, bool(NAME_RE.search(user_text)))
     except Exception as exc:
         log.exception("Ошибка запроса к модели")
-        await thinking.delete()
         await message.reply(
             "😔 Не получилось получить ответ. Попробуй ещё раз чуть позже.\n"
             f"Техническая деталь: {type(exc).__name__}"
         )
         return
-
-    await thinking.delete()
 
     store.add_message("model", text, user_id=user_id)
 

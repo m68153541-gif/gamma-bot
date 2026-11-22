@@ -411,3 +411,36 @@ def peer_by_chat(chat_id: int, connection_ids: list[str] | None = None) -> tuple
             continue
         return row["connection_id"], int(row["chat_id"])
     return None
+
+CONTEXT_SQL = (
+    "SELECT role, text FROM messages WHERE user_id = ? AND connection_id IS NULL"
+    " AND ts > COALESCE((SELECT context_cleared_at FROM users WHERE user_id = ?), '')"
+    " ORDER BY id DESC LIMIT ?"
+)
+
+
+def prepare_answer(user_id: int, text: str, limit: int) -> tuple[str, list[tuple[str, str]]]:
+    statements = [
+        ("SELECT mode FROM users WHERE user_id = ?", (user_id,)),
+        (CONTEXT_SQL, (user_id, user_id, limit * 2)),
+        (
+            "INSERT INTO messages (user_id, role, text, ts, connection_id, chat_id, author_id, author_username)"
+            " VALUES (?, 'user', ?, ?, NULL, NULL, NULL, '')",
+            (user_id, text[:4000], now_iso()),
+        ),
+    ]
+    with _lock:
+        if _turso is not None:
+            results = _turso.request(statements)
+        else:
+            conn = connect()
+            results = []
+            for sql, params in statements:
+                rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+                results.append({"rows": rows})
+            conn.commit()
+
+    mode_rows = results[0]["rows"]
+    mode = mode_rows[0]["mode"] if mode_rows else "normal"
+    rows = results[1]["rows"]
+    return mode, [(r["role"], r["text"]) for r in reversed(rows)]
