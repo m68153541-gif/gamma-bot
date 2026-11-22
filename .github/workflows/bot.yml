@@ -53,7 +53,7 @@ jobs:
           python - <<'PY'
           import bot
           names = {h.callback.__name__ for h in bot.dp.message.handlers}
-          need = {"cmd_start", "on_text", "on_photo", "on_document", "cmd_help", "cmd_adm", "cmd_aboutme", "cmd_forget"}
+          need = {"cmd_start", "on_text", "on_photo", "on_document", "cmd_help", "cmd_adm", "cmd_aboutme", "cmd_repley"}
           missing = need - names
           assert not missing, f"нет обработчиков: {sorted(missing)}"
           assert len(bot.dp.business_message.handlers) == 1, "нет бизнес-обработчика"
