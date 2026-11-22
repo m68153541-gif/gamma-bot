@@ -130,7 +130,7 @@ dp = Dispatcher()
 last_request: dict[int, float] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.17.0"
+BOT_VERSION = "1.18.0"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -569,7 +569,7 @@ def business_status_text(user_id: int) -> str:
             "• «расскажи о чате @a и @b» — разберу переписку двух аккаунтов",
             "• «напиши @username «текст»» — отправлю от твоего лица с подписью «🤖 нейросеть»",
             "",
-            "Команды: /aboutme, /reset, /forget, /help",
+            "Команды: /aboutme, /repley, /reset, /help",
         ]
     )
 
@@ -595,30 +595,6 @@ async def on_adm_refresh(callback: CallbackQuery) -> None:
     if callback.message is not None:
         await callback.message.edit_text(business_status_text(callback.from_user.id))
     await callback.answer("Обновлено")
-
-
-@dp.message(Command("owner"))
-async def cmd_owner(message: Message) -> None:
-    if message.from_user is None:
-        return
-    code = (message.text or "").partition(" ")[2].strip()
-    if not OWNER_CODE:
-        await message.answer("Код доступа не настроен — попроси владельца задать OWNER_CODE.")
-        return
-    if not code:
-        await message.answer(
-            "Открой доступ к архиву владельца: /owner код\n"
-            "Код выдаёт владелец в /adm."
-        )
-        return
-    if code != OWNER_CODE:
-        await message.answer("Код не подошёл.")
-        return
-    store.add_viewer(message.from_user.id)
-    await message.answer(
-        "✅ Доступ открыт: этот аккаунт теперь видит архив переписок владельца.\n"
-        "Проверь /adm, а потом спрашивай «расскажи о @username»."
-    )
 
 
 SELF_PROFILE_INSTRUCTION = (
@@ -1119,18 +1095,81 @@ async def cmd_reset(message: Message) -> None:
     store.clear_context(message.from_user.id)
     await message.answer(
         "🧹 Контекст диалога очищен — отвечаю так, будто мы только познакомились.\n\n"
-        "📚 Архив переписки остаётся в базе: по нему я потом смогу рассказать о тебе.\n"
-        "🗑 Удалить всё полностью — /forget"
+        "📚 Архив переписки остаётся в базе: по нему я потом смогу рассказать о тебе."
     )
 
 
-@dp.message(Command("forget"))
-async def cmd_forget(message: Message) -> None:
-    store.forget_user(message.from_user.id)
-    last_request.pop(message.from_user.id, None)
+reply_waiting: dict[int, bool] = {}
+
+REPLY_INSTRUCTION = (
+    "Ты разбираешь переписки аккаунта Telegram. По фрагментам чатов определи, кем приходится каждый собеседник: "
+    "«друзья», «товарищи», «коллеги», «родственник», «возможная будущая пара», «напряжённые отношения», "
+    "«враги», «опасный человек». Формат ответа — по одной строке на человека:\n"
+    "• @username — метка — одна фраза обоснования.\n"
+    "Опирайся только на реплики из фрагментов, догадки помечай словом «похоже», фактов не выдумывай. "
+    "Пиши по-русски, живо и коротко."
+)
+
+
+async def reply_report(message: Message, username: str) -> None:
+    user_id = message.from_user.id
+    cids = connections_with_username(username)
+    if not cids:
+        await message.answer(
+            f"Аккаунта @{username} нет среди подключённых — его переписки я не видел. "
+            "Проверь написание или подключи его через /adm."
+        )
+        return
+
+    blocks = []
+    total_peers = 0
+    for cid in cids:
+        peer_rows = store.peers(cid)
+        ranked = sorted(
+            peer_rows.items(),
+            key=lambda item: len(store.peer_messages(cid, item[0], 500)),
+            reverse=True,
+        )
+        for chat_id, info in ranked:
+            items = store.peer_messages(cid, chat_id, 15)
+            who = info.get("username") or info.get("name") or str(chat_id)
+            if len(items) < 3:
+                continue
+            total_peers += 1
+            digest = "\n".join(
+                digest_line(r, username, info.get("username") or "")
+                for r in items
+            )
+            blocks.append(f"=== @{who} ({len(items)} сообщ. в выборке) ===\n{digest}")
+
+    if not blocks:
+        await message.answer(f"У @{username} пока нет переписок с достаточным числом сообщений.")
+        return
+
+    parts = [types.Part.from_text(text="\n\n".join(blocks)[-16000:])]
+    thinking = await message.reply(f"🧠 Разбираю диалоги @{username}…")
+    try:
+        text = await asyncio.to_thread(ask_model, parts, [], REPLY_INSTRUCTION)
+    except Exception:
+        log.exception("Ошибка разбора диалогов")
+        await thinking.delete()
+        await message.answer("Не получилось разобрать диалоги, попробуй позже.")
+        return
+
+    await thinking.delete()
+    await message.answer(f"📇 Диалоги @{username}: найдено {total_peers}.")
+    for chunk in split_text(text):
+        await message.reply(to_html(chunk), parse_mode="HTML")
+
+
+@dp.message(Command("repley"))
+async def cmd_repley(message: Message) -> None:
+    if message.from_user is None:
+        return
+    reply_waiting[message.from_user.id] = True
     await message.answer(
-        "🗑 Готово: удалил из базы твои сообщения, профиль и настройки. "
-        "Дальше я тебя не помню."
+        "Напиши юзернейм аккаунта (например @username) — покажу все его диалоги "
+        "и предположу, кто кем ему приходится."
     )
 
 
@@ -1150,9 +1189,8 @@ async def cmd_help(message: Message) -> None:
         "5. 😈 /dir — агрессивный режим, 🔙 /andir — вернуть спокойный.\n"
         "6. 📖 /vopros — расскажу о себе.\n"
         "7. 👤 /aboutme — расскажу, что я о тебе знаю по переписке.\n"
-        "8. 🗑 /forget — удалить всё о тебе из базы насовсем.\n"
-        "9. 🔌 /adm — подключение к аккаунту и работа с личными чатами.\n"
-        "10. 👀 /owner код — со второго аккаунта видеть архив владельца.\n\n"
+        "8. 📇 /repley — все диалоги аккаунта и кто кем тебе приходится.\n"
+        "9. 🔌 /adm — подключение к аккаунту и работа с личными чатами.\n\n"
         f"Для ответа беру последние {HISTORY_TURNS} сообщений, остальное лежит в базе. "
         f"Ограничения: не больше {MAX_IMAGE_MB} МБ на изображение, "
         f"один запрос в {COOLDOWN_SECONDS} сек."
@@ -1248,6 +1286,14 @@ async def on_text(message: Message) -> None:
     if not text:
         return
     if not await require_subscription(message):
+        return
+
+    if reply_waiting.pop(message.from_user.id, False):
+        match = re.search(r"@?([A-Za-z0-9_]{3,64})", text)
+        if not match:
+            await message.answer("Не понял юзернейм. Напиши так: @username")
+            return
+        await reply_report(message, match.group(1))
         return
 
     if await try_business_intent(message, text):
