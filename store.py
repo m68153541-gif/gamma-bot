@@ -444,3 +444,31 @@ def prepare_answer(user_id: int, text: str, limit: int) -> tuple[str, list[tuple
     mode = mode_rows[0]["mode"] if mode_rows else "normal"
     rows = results[1]["rows"]
     return mode, [(r["role"], r["text"]) for r in reversed(rows)]
+
+def set_author(connection_id: str, role: str, username: str, author_id: int | None = None) -> None:
+    _write(
+        "UPDATE messages SET author_username = ?, author_id = COALESCE(?, author_id)"
+        " WHERE connection_id = ? AND role = ? AND (author_username IS NULL OR author_username = '')",
+        (username, author_id, connection_id, role),
+    )
+
+
+def backfill_authors(connections: dict[str, dict]) -> int:
+    done = 0
+    for cid, info in connections.items():
+        owner = info.get("username") or ""
+        owner_id = info.get("user_id")
+        if owner:
+            set_author(cid, "me", owner, int(owner_id) if owner_id else None)
+            done += 1
+        for chat_id, peer in peers(cid).items():
+            name = peer.get("username") or ""
+            if name:
+                _write(
+                    "UPDATE messages SET author_username = ?"
+                    " WHERE connection_id = ? AND chat_id = ? AND role = 'peer'"
+                    " AND (author_username IS NULL OR author_username = '')",
+                    (name, cid, chat_id),
+                )
+                done += 1
+    return done

@@ -130,7 +130,7 @@ dp = Dispatcher()
 last_request: dict[int, float] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.16.0"
+BOT_VERSION = "1.17.0"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -359,8 +359,10 @@ BUSINESS_SIGNATURE = "\n\n🤖 нейросеть"
 
 
 PROFILE_INSTRUCTION = (
-    "Ты аналитик переписки. Реплики подписаны юзернеймами авторов «@username: текст» — "
-    "не путай, кто что написал, и опирайся на слова каждого участника отдельно. "
+    "Ты аналитик переписки. Каждая реплика начинается с юзернейма автора: «@username: текст». "
+    "Это проверенный факт, а не догадка. Строго приписывай каждую реплику тому юзернейму, "
+    "которым она подписана, никогда не меняй авторов местами и не приписывай одному участнику "
+    "слова другого. Если цитируешь — указывай, кому принадлежит фраза. "
     "По фрагменту диалога опиши по-русски, по пунктам: "
     "1) кто собеседник по манере общения — стиль, интересы, характер; "
     "2) тон и основные темы; "
@@ -759,8 +761,13 @@ async def show_chat(
         )
         return True
 
-    digest = "\n".join(digest_line(item) for item in items[-60:])
-    header = f"Переписка с @{peer_name}" + (f" (аккаунт @{account})" if account else "")
+    owner, peer = chat_participants(cid, chat_id)
+    digest = "\n".join(digest_line(item, owner, peer) for item in items[-60:])
+    owner = owner or account or "владелец"
+    header = (
+        f"Переписка двух участников: @{owner} (владелец аккаунта) и @{peer or peer_name}. "
+        f"Каждая строка помечена автором. Не меняй авторов местами."
+    )
     parts = [types.Part.from_text(text=f"{header}:\n\n{digest}")]
     thinking = await message.reply("🧠 Читаю переписку…")
     try:
@@ -777,17 +784,28 @@ async def show_chat(
     return True
 
 
-def digest_line(item: dict) -> str:
+def chat_participants(cid: str, chat_id: int) -> tuple[str, str]:
+    info = store.connections().get(cid) or {}
+    owner = (info.get("username") or "").strip()
+    peer_info = store.peers(cid).get(chat_id) or {}
+    peer = (peer_info.get("username") or "").strip()
+    return owner, peer
+
+
+def digest_line(item: dict, owner: str = "", peer: str = "") -> str:
     name = (item.get("author_username") or "").strip()
+    if not name:
+        name = owner if item["role"] == "me" else peer
     text = item["text"].replace("\n", " ")
     if name:
         return f"@{name}: {text}"
-    return ("Я: " if item["role"] == "me" else "Собеседник: ") + text
+    return ("владелец аккаунта: " if item["role"] == "me" else "собеседник: ") + text
 
 
 def peer_digest(cid: str, chat_id: int, limit: int = 40) -> str:
+    owner, peer = chat_participants(cid, chat_id)
     rows = store.peer_messages(cid, chat_id, limit)
-    return "\n".join(digest_line(r) for r in rows)
+    return "\n".join(digest_line(r, owner, peer) for r in rows)
 
 
 ACCOUNT_INSTRUCTION = (
@@ -1303,6 +1321,12 @@ async def main() -> None:
     if sync.restore():
         log.info("База поднята из зашифрованного снимка")
     store.init()
+    try:
+        filled = store.backfill_authors(store.connections())
+        if filled:
+            log.info("Авторы проставлены у старых сообщений: %d чатов", filled)
+    except Exception:
+        log.exception("Не удалось дозаполнить авторов")
     asyncio.create_task(sync_loop())
     log.info("Бот запущен, модели: %s", ", ".join(MODELS))
     try:
