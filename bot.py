@@ -142,7 +142,7 @@ dp = Dispatcher()
 last_request: dict[int, float] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.19.0"
+BOT_VERSION = "1.20.0"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -475,6 +475,7 @@ async def remember_business_message(message: Message) -> None:
     name = message.chat.full_name if getattr(message.chat, "full_name", None) else ""
 
     store.add_peer(cid, message.chat.id, username, name)
+    store.upsert_chat(cid, message.chat.id, known.get("username") or "", username, name)
 
     sender = message.from_user
     author_username = ""
@@ -516,15 +517,13 @@ def has_owner_access(user_id: int) -> bool:
 
 
 def connections_for(user_id: int) -> dict[str, dict]:
-    result: dict[str, dict] = {}
-    privileged = has_owner_access(user_id)
-    for cid, info in store.connections().items():
-        owner = connection_owner(info)
-        if owner == user_id:
-            result[cid] = info
-        elif privileged and owner in (None, ADMIN_ID):
-            result[cid] = info
-    return result
+    if user_id == ADMIN_ID:
+        return store.connections()
+    return {
+        cid: info
+        for cid, info in store.connections().items()
+        if connection_owner(info) == user_id
+    }
 
 
 def owner_usernames(user_id: int) -> set[str]:
@@ -865,61 +864,78 @@ async def describe_account(message: Message, cids: list[str], username: str) -> 
 
 async def chat_report(message: Message, names: list[str], text: str) -> bool:
     user_id = message.from_user.id
-    conns = store.connections()
-    if not conns:
-        await message.answer("Бот пока не подключён ни к одному аккаунту — напиши /adm.")
+    allowed = list(connections_for(user_id))
+    if not allowed:
+        await message.answer(
+            "У этого аккаунта нет подключения к боту, поэтому переписок я не вижу. Подключение — в /adm."
+        )
         return True
 
-    wants_my = bool(re.search(r"(?i)(мой чат|моём|моем|со мной|с моим|моего чата|мою переписк|моего аккаунта)", text))
+    wants_my = bool(
+        re.search(r"(?i)(мой чат|моём|моем|со мной|с моим|моего чата|мою переписк|моего аккаунта)", text)
+    )
 
-    # 1) «мой чат с @user»
+    # 1) «мой чат с @user» — только чат своего аккаунта
     if len(names) == 1 and wants_my:
-        own = connections_owned_by(user_id)
+        own = list(connections_owned_by(user_id))
         if not own:
             await message.answer(
-                "У этого аккаунта нет подключения к боту, так что личного чата здесь нет. "
-                "Подключись через /adm или укажи оба юзернейма: «расскажи о чате @a и @b»."
+                "У этого аккаунта нет своего подключения — личного чата здесь нет. "
+                "Либо укажи оба юзернейма: «расскажи о чате @a и @b»."
             )
             return True
-        target = store.peer_by_username(names[0], list(own))
+        target = store.peer_by_username(names[0], own)
         if target is None:
             await message.answer(f"Чата с @{names[0]} у твоего аккаунта в базе нет.")
             return True
         return await show_chat(message, target[0], target[1], names[0])
 
-    # 2) чат между двумя аккаунтами
+    # 2) чат двух аккаунтов — строго эта пара
     if len(names) >= 2:
         first, second = names[0], names[1]
         for account, peer in ((first, second), (second, first)):
-            cids = connections_with_username(account)
+            cids = [c for c in connections_with_username(account) if c in allowed]
             if not cids:
                 continue
-            target = store.peer_by_username(peer, cids)
+            target = store.find_chat(account, peer, cids)
             if target is None:
                 await message.answer(
-                    f"Переписки @{account} ↔ @{peer} в базе нет: бот не видел между ними сообщений."
+                    f"Переписки @{account} ↔ @{peer} в базе нет: бот не видел сообщений между ними."
                 )
                 return True
             return await show_chat(message, target[0], target[1], peer, account=account)
         await message.answer(
-            "Ни один из этих аккаунтов не подключён к боту, поэтому их переписку я не видел. "
-            "Подключи нужный в /adm."
+            "Ни один из этих аккаунтов тебе не подключён, поэтому их переписку я не видел."
         )
         return True
 
-    # 3) один юзернейм: аккаунт или человек
+    # 3) один юзернейм
     name = names[0]
-    cids = connections_with_username(name)
-    if cids:
+    if connections_with_username(name) and any(c in allowed for c in connections_with_username(name)):
+        cids = [c for c in connections_with_username(name) if c in allowed]
         return await describe_account(message, cids, name)
 
-    own = connections_owned_by(user_id)
-    for cid in list(own) + [c for c in conns if c not in own]:
-        target = store.peer_by_username(name, [cid])
-        if target:
-            return await show_chat(message, cid, target[1], name)
+    found = store.chats_for_peer(name, allowed)
+    if not found:
+        await message.answer(f"Про @{name} в базе пусто — переписки с ним я не видел.")
+        return True
 
-    await message.answer(f"Про @{name} в базе пусто — переписки с ним я не видел.")
+    if len(found) == 1:
+        row = found[0]
+        return await show_chat(
+            message, row["connection_id"], int(row["chat_id"]), name, account=row["owner_username"] or None
+        )
+
+    lines = []
+    for row in found[:10]:
+        lines.append(
+            f"• @{row['owner_username'] or 'аккаунт'} ↔ @{name} — {row['messages']} сообщ."
+        )
+    await message.answer(
+        "С @%s есть чаты в нескольких аккаунтах:\n%s\n\n"
+        "Уточни, какой нужен: «расскажи о чате @%s и @владелец»."
+        % (name, "\n".join(lines), name)
+    )
     return True
 
 
@@ -1393,6 +1409,9 @@ async def main() -> None:
         filled = store.backfill_authors(store.connections())
         if filled:
             log.info("Авторы проставлены у старых сообщений: %d чатов", filled)
+        made = store.backfill_chats(store.connections())
+        if made:
+            log.info("Таблица чатов дозаполнена: %d", made)
     except Exception:
         log.exception("Не удалось дозаполнить авторов")
     asyncio.create_task(sync_loop())

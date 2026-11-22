@@ -63,6 +63,16 @@ SCHEMA = [
     user_id INTEGER PRIMARY KEY,
     added_at TEXT NOT NULL
 )""",
+    """CREATE TABLE IF NOT EXISTS chats (
+    connection_id TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    owner_username TEXT,
+    peer_username TEXT,
+    peer_name TEXT,
+    messages INTEGER NOT NULL DEFAULT 0,
+    last_seen TEXT NOT NULL,
+    PRIMARY KEY (connection_id, chat_id)
+)""",
 ]
 
 
@@ -472,3 +482,71 @@ def backfill_authors(connections: dict[str, dict]) -> int:
                 )
                 done += 1
     return done
+
+def upsert_chat(
+    connection_id: str,
+    chat_id: int,
+    owner_username: str,
+    peer_username: str,
+    peer_name: str = "",
+) -> None:
+    _write(
+        "INSERT INTO chats (connection_id, chat_id, owner_username, peer_username, peer_name, messages, last_seen)"
+        " VALUES (?, ?, ?, ?, ?, 1, ?)"
+        " ON CONFLICT(connection_id, chat_id) DO UPDATE SET"
+        " owner_username = CASE WHEN excluded.owner_username <> '' THEN excluded.owner_username ELSE chats.owner_username END,"
+        " peer_username = CASE WHEN excluded.peer_username <> '' THEN excluded.peer_username ELSE chats.peer_username END,"
+        " peer_name = CASE WHEN excluded.peer_name <> '' THEN excluded.peer_name ELSE chats.peer_name END,"
+        " messages = chats.messages + 1, last_seen = excluded.last_seen",
+        (connection_id, chat_id, owner_username, peer_username, peer_name, now_iso()),
+    )
+
+
+def chats(connection_ids: list[str] | None = None) -> list[dict]:
+    rows = _rows(
+        "SELECT connection_id, chat_id, owner_username, peer_username, peer_name, messages, last_seen"
+        " FROM chats ORDER BY messages DESC"
+    )
+    if connection_ids is not None:
+        rows = [r for r in rows if r["connection_id"] in connection_ids]
+    return rows
+
+
+def find_chat(owner: str, peer: str, connection_ids: list[str] | None = None) -> tuple[str, int] | None:
+    owner_low = owner.lower()
+    peer_low = peer.lower()
+    for row in chats(connection_ids):
+        o = (row["owner_username"] or "").lower()
+        p = (row["peer_username"] or "").lower()
+        if o == owner_low and p == peer_low:
+            return row["connection_id"], int(row["chat_id"])
+    return None
+
+
+def chats_for_peer(peer: str, connection_ids: list[str] | None = None) -> list[dict]:
+    peer_low = peer.lower()
+    return [r for r in chats(connection_ids) if (r["peer_username"] or "").lower() == peer_low]
+
+
+def backfill_chats(connections: dict[str, dict]) -> int:
+    made = 0
+    for cid, info in connections.items():
+        owner = info.get("username") or ""
+        for chat_id, peer in peers(cid).items():
+            name = peer.get("username") or ""
+            if not name:
+                continue
+            known = _rows(
+                "SELECT chat_id FROM chats WHERE connection_id = ? AND chat_id = ?",
+                (cid, chat_id),
+            )
+            if known:
+                continue
+            count = len(peer_messages(cid, chat_id, 5000))
+            _write(
+                "INSERT INTO chats (connection_id, chat_id, owner_username, peer_username, peer_name, messages, last_seen)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(connection_id, chat_id) DO NOTHING",
+                (cid, chat_id, owner, name, peer.get("name") or "", count, now_iso()),
+            )
+            made += 1
+    return made
