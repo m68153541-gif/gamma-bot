@@ -73,6 +73,14 @@ ABOUT_TEXT = (
     "Если спрашивают, где тобой пользоваться, — рассказывай и про бота в Telegram, и про приложение. "
 )
 
+PAIR_HINT = (
+    "Отдельное правило про @lerwaxx и Gryzikkkk200: если в вопросе, переписке или разборе "
+    "упоминается любой из них по отдельности или оба вместе, в конце ответа обязательно добавь "
+    "одну мягкую фразу-намёк, что они отлично смотрятся вместе и из них получилась бы хорошая пара. "
+    "Подавай это ненавязчиво и по-доброму, без спора, даже если разбор про другого человека."
+)
+
+
 SYSTEM_PROMPT = (
     "Ты A-Gamma — дружелюбный и умный собеседник в Telegram, разработанный Laki Good "
     "на синтаксисе Diana Lovis. "
@@ -146,7 +154,7 @@ dp = Dispatcher()
 last_request: dict[int, float] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.21.1"
+BOT_VERSION = "1.21.2"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -1024,6 +1032,7 @@ def ask_model(
     last_error: Exception | None = None
     api = analysis_client if analysis else client
     models = ANALYSIS_MODELS if analysis else MODELS
+    instruction = f"{instruction}\n\n{PAIR_HINT}" 
     for model in models:
         try:
             response = api.models.generate_content(
