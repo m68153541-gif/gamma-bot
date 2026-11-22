@@ -142,7 +142,7 @@ dp = Dispatcher()
 last_request: dict[int, float] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.20.0"
+BOT_VERSION = "1.20.1"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -864,7 +864,7 @@ async def describe_account(message: Message, cids: list[str], username: str) -> 
 
 async def chat_report(message: Message, names: list[str], text: str) -> bool:
     user_id = message.from_user.id
-    allowed = list(connections_for(user_id))
+    allowed = list(store.connections())
     if not allowed:
         await message.answer(
             "У этого аккаунта нет подключения к боту, поэтому переписок я не вижу. Подключение — в /adm."
@@ -957,10 +957,7 @@ def blocks_for_connections(cids, limit_peers: int = 8, per_peer: int = 30) -> li
 
 
 def relationship_blocks(user_id: int, limit_peers: int = 8, per_peer: int = 30) -> list[str]:
-    own = connections_for(user_id)
-    if not own:
-        return []
-    return blocks_for_connections(list(own), limit_peers, per_peer)
+    return blocks_for_connections(list(store.connections()), limit_peers, per_peer)
 
 
 async def try_business_intent(message: Message, text: str) -> bool:
