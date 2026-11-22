@@ -39,6 +39,13 @@ MODELS = [
     if m.strip()
 ]
 
+ANALYSIS_API_KEY = os.getenv("ANALYSIS_API_KEY", "").strip() or GEMINI_API_KEY
+ANALYSIS_MODELS = [
+    m.strip()
+    for m in os.getenv("ANALYSIS_MODELS", DEFAULT_MODEL).split(",")
+    if m.strip()
+]
+
 COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "5"))
 OWNER_CODE = os.getenv("OWNER_CODE", "").strip()
 MAX_IMAGE_MB = int(os.getenv("MAX_IMAGE_MB", "10"))
@@ -126,11 +133,16 @@ client = genai.Client(
     api_key=GEMINI_API_KEY,
     http_options=types.HttpOptions(timeout=60000),
 )
+analysis_client = (
+    client
+    if ANALYSIS_API_KEY == GEMINI_API_KEY
+    else genai.Client(api_key=ANALYSIS_API_KEY, http_options=types.HttpOptions(timeout=60000))
+)
 dp = Dispatcher()
 last_request: dict[int, float] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.18.0"
+BOT_VERSION = "1.19.0"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -651,6 +663,8 @@ async def self_profile(message: Message) -> bool:
             [types.Part.from_text(text=payload)],
             [],
             instruction,
+            False,
+            True,
         )
     except Exception:
         log.exception("Ошибка сборки профиля")
@@ -747,7 +761,7 @@ async def show_chat(
     parts = [types.Part.from_text(text=f"{header}:\n\n{digest}")]
     thinking = await message.reply("🧠 Читаю переписку…")
     try:
-        text = await asyncio.to_thread(ask_model, parts, [], PROFILE_INSTRUCTION)
+        text = await asyncio.to_thread(ask_model, parts, [], PROFILE_INSTRUCTION, False, True)
     except Exception:
         log.exception("Ошибка анализа переписки")
         await thinking.delete()
@@ -837,7 +851,7 @@ async def describe_account(message: Message, cids: list[str], username: str) -> 
     parts = [types.Part.from_text(text="\n\n".join(blocks)[-16000:])]
     thinking = await message.reply(f"🧠 Смотрю переписки аккаунта @{username}…")
     try:
-        text = await asyncio.to_thread(ask_model, parts, [], ACCOUNT_INSTRUCTION)
+        text = await asyncio.to_thread(ask_model, parts, [], ACCOUNT_INSTRUCTION, False, True)
     except Exception:
         log.exception("Ошибка разбора аккаунта")
         await thinking.delete()
@@ -983,11 +997,19 @@ async def broadcast(bot: Bot, text: str) -> tuple[int, int]:
     return ok, failed
 
 
-def ask_model(parts: list, past: list[types.Content], instruction: str, guard: bool = False) -> str:
+def ask_model(
+    parts: list,
+    past: list[types.Content],
+    instruction: str,
+    guard: bool = False,
+    analysis: bool = False,
+) -> str:
     last_error: Exception | None = None
-    for model in MODELS:
+    api = analysis_client if analysis else client
+    models = ANALYSIS_MODELS if analysis else MODELS
+    for model in models:
         try:
-            response = client.models.generate_content(
+            response = api.models.generate_content(
                 model=model,
                 contents=[*past, types.Content(role="user", parts=parts)],
                 config=types.GenerateContentConfig(
@@ -1149,7 +1171,7 @@ async def reply_report(message: Message, username: str) -> None:
     parts = [types.Part.from_text(text="\n\n".join(blocks)[-16000:])]
     thinking = await message.reply(f"🧠 Разбираю диалоги @{username}…")
     try:
-        text = await asyncio.to_thread(ask_model, parts, [], REPLY_INSTRUCTION)
+        text = await asyncio.to_thread(ask_model, parts, [], REPLY_INSTRUCTION, False, True)
     except Exception:
         log.exception("Ошибка разбора диалогов")
         await thinking.delete()

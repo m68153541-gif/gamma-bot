@@ -64,6 +64,8 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANALYSIS_API_KEY: ${{ secrets.ANALYSIS_API_KEY }}
+          ANALYSIS_MODELS: gemini-3.1-flash-lite
           DB_KEY: ${{ secrets.DB_KEY }}
           TURSO_DB_URL: ${{ secrets.TURSO_DB_URL }}
           TURSO_DB_TOKEN: ${{ secrets.TURSO_DB_TOKEN }}
