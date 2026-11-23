@@ -65,14 +65,15 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           ANALYSIS_API_KEY: ${{ secrets.ANALYSIS_API_KEY }}
-          ANALYSIS_MODELS: gemini-3.1-flash-lite,gemini-3.5-flash-lite,gemini-flash-lite-latest,gemini-2.0-flash-lite
+          ANALYSIS_MODELS: gemini-3.1-flash-lite,gemini-3.5-flash-lite,gemini-flash-lite-latest,gemini-flash-latest,gemini-2.0-flash-lite
           ANALYSIS_CHARS: "8000"
-          ASK_DEADLINE_SECONDS: "100"
+          ASK_DEADLINE_SECONDS: "25"
+          ANALYSIS_DEADLINE_SECONDS: "45"
           DB_KEY: ${{ secrets.DB_KEY }}
           TURSO_DB_URL: ${{ secrets.TURSO_DB_URL }}
           TURSO_DB_TOKEN: ${{ secrets.TURSO_DB_TOKEN }}
           OWNER_CODE: ${{ secrets.OWNER_CODE }}
-          MODELS: gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-flash-lite-latest,gemini-2.0-flash-lite
+          MODELS: gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-flash-lite-latest,gemini-flash-latest,gemini-2.0-flash-lite
           HISTORY_TURNS: "8"
           COOLDOWN_SECONDS: "5"
           MAX_IMAGE_MB: "10"

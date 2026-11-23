@@ -214,44 +214,18 @@ def _rows(sql: str, params: tuple = ()) -> list[dict]:
 
 def touch_user(user_id: int, chat_id: int | None, username: str = "", first_name: str = "", last_name: str = "") -> None:
     stamp = now_iso()
-    with _lock:
-        if _turso is not None:
-            existing = _turso.query("SELECT first_seen FROM users WHERE user_id = ?", (user_id,))
-            if existing:
-                _turso.execute(
-                    "UPDATE users SET chat_id = COALESCE(?, chat_id),"
-                    " username = CASE WHEN ? <> '' THEN ? ELSE username END,"
-                    " first_name = CASE WHEN ? <> '' THEN ? ELSE first_name END,"
-                    " last_name = CASE WHEN ? <> '' THEN ? ELSE last_name END,"
-                    " last_seen = ?, messages = messages + 1 WHERE user_id = ?",
-                    (chat_id, username, username, first_name, first_name, last_name, last_name, stamp, user_id),
-                )
-            else:
-                _turso.execute(
-                    "INSERT INTO users (user_id, chat_id, username, first_name, last_name, first_seen, last_seen, messages)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
-                    (user_id, chat_id, username, first_name, last_name, stamp, stamp),
-                )
-            return
-
-        conn = connect()
-        row = conn.execute("SELECT first_seen FROM users WHERE user_id = ?", (user_id,)).fetchone()
-        if row is None:
-            conn.execute(
-                "INSERT INTO users (user_id, chat_id, username, first_name, last_name, first_seen, last_seen, messages)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
-                (user_id, chat_id, username, first_name, last_name, stamp, stamp),
-            )
-        else:
-            conn.execute(
-                "UPDATE users SET chat_id = COALESCE(?, chat_id),"
-                " username = CASE WHEN ? <> '' THEN ? ELSE username END,"
-                " first_name = CASE WHEN ? <> '' THEN ? ELSE first_name END,"
-                " last_name = CASE WHEN ? <> '' THEN ? ELSE last_name END,"
-                " last_seen = ?, messages = messages + 1 WHERE user_id = ?",
-                (chat_id, username, username, first_name, first_name, last_name, last_name, stamp, user_id),
-            )
-        conn.commit()
+    _write(
+        "INSERT INTO users (user_id, chat_id, username, first_name, last_name, first_seen, last_seen, messages)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, 1)"
+        " ON CONFLICT(user_id) DO UPDATE SET"
+        " chat_id = COALESCE(excluded.chat_id, users.chat_id),"
+        " username = CASE WHEN excluded.username <> '' THEN excluded.username ELSE users.username END,"
+        " first_name = CASE WHEN excluded.first_name <> '' THEN excluded.first_name ELSE users.first_name END,"
+        " last_name = CASE WHEN excluded.last_name <> '' THEN excluded.last_name ELSE users.last_name END,"
+        " last_seen = excluded.last_seen,"
+        " messages = users.messages + 1",
+        (user_id, chat_id, username, first_name, last_name, stamp, stamp),
+    )
 
 
 def get_mode(user_id: int) -> str:
