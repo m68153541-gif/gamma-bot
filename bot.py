@@ -42,7 +42,7 @@ MODELS = [
 ANALYSIS_API_KEY = os.getenv("ANALYSIS_API_KEY", "").strip() or GEMINI_API_KEY
 ANALYSIS_MODELS = [
     m.strip()
-    for m in os.getenv("ANALYSIS_MODELS", DEFAULT_MODEL).split(",")
+    for m in os.getenv("ANALYSIS_MODELS", DEFAULT_MODEL + ",gemini-3.1-flash-lite").split(",")
     if m.strip()
 ]
 
@@ -164,7 +164,7 @@ dp = Dispatcher()
 last_request: dict[int, float] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.22.0"
+BOT_VERSION = "1.22.1"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -1060,28 +1060,35 @@ def ask_model(
     guard: bool = False,
     analysis: bool = False,
 ) -> str:
+    attempts: list[tuple[object, list[str]]] = []
+    if analysis:
+        attempts.append((analysis_client, ANALYSIS_MODELS))
+        if analysis_client is not client:
+            attempts.append((client, MODELS))
+    else:
+        attempts.append((client, MODELS))
+
     last_error: Exception | None = None
-    api = analysis_client if analysis else client
-    models = ANALYSIS_MODELS if analysis else MODELS
-    for model in models:
-        try:
-            response = api.models.generate_content(
-                model=model,
-                contents=[*past, types.Content(role="user", parts=parts)],
-                config=types.GenerateContentConfig(
-                    system_instruction=instruction,
-                    temperature=0.3,
-                    max_output_tokens=2048,
-                ),
-            )
-        except Exception as exc:
-            log.warning("Модель %s недоступна: %s", model, type(exc).__name__)
-            last_error = exc
-            continue
-        text = calm_names(ensure_emojis(clean_reply((response.text or "").strip())), force=guard)
-        if text:
-            return text
-        last_error = RuntimeError("Модель вернула пустой ответ")
+    for api, models in attempts:
+        for model in models:
+            try:
+                response = api.models.generate_content(
+                    model=model,
+                    contents=[*past, types.Content(role="user", parts=parts)],
+                    config=types.GenerateContentConfig(
+                        system_instruction=instruction,
+                        temperature=0.3,
+                        max_output_tokens=2048,
+                    ),
+                )
+            except Exception as exc:
+                log.warning("Модель %s недоступна: %s", model, type(exc).__name__)
+                last_error = exc
+                continue
+            text = calm_names(ensure_emojis(clean_reply((response.text or "").strip())), force=guard)
+            if text:
+                return text
+            last_error = RuntimeError("Модель вернула пустой ответ")
     raise last_error or RuntimeError("Нет доступных моделей")
 
 
