@@ -40,6 +40,7 @@ MODELS = [
 ]
 
 ANALYSIS_API_KEY = os.getenv("ANALYSIS_API_KEY", "").strip() or GEMINI_API_KEY
+ANALYSIS_CHARS = int(os.getenv("ANALYSIS_CHARS", "1400"))
 ANALYSIS_MODELS = [
     m.strip()
     for m in os.getenv("ANALYSIS_MODELS", DEFAULT_MODEL + ",gemini-3.1-flash-lite").split(",")
@@ -164,7 +165,7 @@ dp = Dispatcher()
 last_request: dict[int, float] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.22.1"
+BOT_VERSION = "1.22.5"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -671,7 +672,7 @@ async def self_profile(message: Message) -> bool:
         instruction = SELF_PROFILE_WITH_MAP
         payload = (
             f"Переписка со мной:\n\n{digest or '(почти нет)'}\n\n"
-            "Переписки с другими людьми:\n\n" + "\n\n".join(peers)[-16000:]
+            "Переписки с другими людьми:\n\n" + "\n\n".join(peers)[-ANALYSIS_CHARS:]
         )
     else:
         instruction = SELF_PROFILE_INSTRUCTION
@@ -780,7 +781,7 @@ async def show_chat(
             "Напишите друг другу пару сообщений словами, и я всё покажу."
         )
         return True
-    digest = "\n".join(digest_line(item, owner, peer) for item in texts[-60:])
+    digest = "\n".join(digest_line(item, owner, peer) for item in texts[-60:])[-ANALYSIS_CHARS:]
     owner = owner or account or "владелец"
     header = (
         f"Переписка двух участников: @{owner} (владелец аккаунта) и @{peer or peer_name}. "
@@ -887,7 +888,7 @@ async def describe_account(message: Message, cids: list[str], username: str) -> 
     if not blocks:
         await message.answer(f"У @{username} в базе пока нет чатов — нечего разбирать.")
         return True
-    payload = "\n\n".join(blocks)[-16000:]
+    payload = "\n\n".join(blocks)[-ANALYSIS_CHARS:]
     parts = [types.Part.from_text(text=payload)]
     thinking = await message.reply(f"🧠 Смотрю переписки аккаунта @{username}…")
     try:
@@ -1071,24 +1072,34 @@ def ask_model(
     last_error: Exception | None = None
     for api, models in attempts:
         for model in models:
-            try:
-                response = api.models.generate_content(
-                    model=model,
-                    contents=[*past, types.Content(role="user", parts=parts)],
-                    config=types.GenerateContentConfig(
-                        system_instruction=instruction,
-                        temperature=0.3,
-                        max_output_tokens=2048,
-                    ),
-                )
-            except Exception as exc:
-                log.warning("Модель %s недоступна: %s", model, type(exc).__name__)
-                last_error = exc
-                continue
-            text = calm_names(ensure_emojis(clean_reply((response.text or "").strip())), force=guard)
-            if text:
-                return text
-            last_error = RuntimeError("Модель вернула пустой ответ")
+            for attempt in range(3):
+                try:
+                    response = api.models.generate_content(
+                        model=model,
+                        contents=[*past, types.Content(role="user", parts=parts)],
+                        config=types.GenerateContentConfig(
+                            system_instruction=instruction,
+                            temperature=0.3,
+                            max_output_tokens=900 if analysis else 2048,
+                        ),
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    wait = 2 * (attempt + 1)
+                    log.warning(
+                        "Модель %s не ответила (%s), повтор через %s с",
+                        model,
+                        type(exc).__name__,
+                        wait,
+                    )
+                    time.sleep(wait)
+                    continue
+                raw = (response.text or "").strip()
+                cleaned = clean_reply(raw)
+                if not re.search(r"[A-Za-zА-Яа-яЁё0-9]", cleaned):
+                    last_error = RuntimeError("Модель вернула пустой ответ")
+                    continue
+                return calm_names(ensure_emojis(cleaned), force=guard)
     raise last_error or RuntimeError("Нет доступных моделей")
 
 
@@ -1237,7 +1248,7 @@ async def reply_report(message: Message, username: str) -> None:
         await message.answer(f"У @{username} пока нет переписок с достаточным числом сообщений.")
         return
 
-    payload = "\n\n".join(blocks)[-16000:]
+    payload = "\n\n".join(blocks)[-ANALYSIS_CHARS:]
     parts = [types.Part.from_text(text=payload)]
     thinking = await message.reply(f"🧠 Разбираю диалоги @{username}…")
     try:
