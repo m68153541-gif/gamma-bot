@@ -73,6 +73,16 @@ ABOUT_TEXT = (
     "Если спрашивают, где тобой пользоваться, — рассказывай и про бота в Telegram, и про приложение. "
 )
 
+PAIR_NAMES = ("lerwaxx", "gryzikkkk")
+
+
+def with_pair_hint(instruction: str, haystack: str) -> str:
+    low = (haystack or "").lower()
+    if any(name in low for name in PAIR_NAMES):
+        return f"{instruction}\n\n{PAIR_HINT}"
+    return instruction
+
+
 PAIR_HINT = (
     "Отдельное правило про @lerwaxx и Gryzikkkk200: если в вопросе, переписке или разборе "
     "упоминается любой из них по отдельности или оба вместе, в конце ответа обязательно добавь "
@@ -154,7 +164,7 @@ dp = Dispatcher()
 last_request: dict[int, float] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.21.2"
+BOT_VERSION = "1.21.3"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -673,7 +683,7 @@ async def self_profile(message: Message) -> bool:
             ask_model,
             [types.Part.from_text(text=payload)],
             [],
-            instruction,
+            with_pair_hint(instruction, payload),
             False,
             True,
         )
@@ -769,10 +779,13 @@ async def show_chat(
         f"Переписка двух участников: @{owner} (владелец аккаунта) и @{peer or peer_name}. "
         f"Каждая строка помечена автором. Не меняй авторов местами."
     )
-    parts = [types.Part.from_text(text=f"{header}:\n\n{digest}")]
+    payload = f"{header}:\n\n{digest}"
+    parts = [types.Part.from_text(text=payload)]
     thinking = await message.reply("🧠 Читаю переписку…")
     try:
-        text = await asyncio.to_thread(ask_model, parts, [], PROFILE_INSTRUCTION, False, True)
+        text = await asyncio.to_thread(
+            ask_model, parts, [], with_pair_hint(PROFILE_INSTRUCTION, payload), False, True
+        )
     except Exception:
         log.exception("Ошибка анализа переписки")
         await thinking.delete()
@@ -859,10 +872,13 @@ async def describe_account(message: Message, cids: list[str], username: str) -> 
     if not blocks:
         await message.answer(f"У @{username} в базе пока нет чатов — нечего разбирать.")
         return True
-    parts = [types.Part.from_text(text="\n\n".join(blocks)[-16000:])]
+    payload = "\n\n".join(blocks)[-16000:]
+    parts = [types.Part.from_text(text=payload)]
     thinking = await message.reply(f"🧠 Смотрю переписки аккаунта @{username}…")
     try:
-        text = await asyncio.to_thread(ask_model, parts, [], ACCOUNT_INSTRUCTION, False, True)
+        text = await asyncio.to_thread(
+            ask_model, parts, [], with_pair_hint(ACCOUNT_INSTRUCTION, username + payload), False, True
+        )
     except Exception:
         log.exception("Ошибка разбора аккаунта")
         await thinking.delete()
@@ -1032,7 +1048,6 @@ def ask_model(
     last_error: Exception | None = None
     api = analysis_client if analysis else client
     models = ANALYSIS_MODELS if analysis else MODELS
-    instruction = f"{instruction}\n\n{PAIR_HINT}" 
     for model in models:
         try:
             response = api.models.generate_content(
@@ -1073,7 +1088,13 @@ async def answer(message: Message, parts: list, user_text: str) -> None:
 
     await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
     try:
-        text = await asyncio.to_thread(ask_model, parts, past, instruction, bool(NAME_RE.search(user_text)))
+        text = await asyncio.to_thread(
+            ask_model,
+            parts,
+            past,
+            with_pair_hint(instruction, user_text),
+            bool(NAME_RE.search(user_text)),
+        )
     except Exception as exc:
         log.exception("Ошибка запроса к модели")
         await message.reply(
@@ -1194,10 +1215,13 @@ async def reply_report(message: Message, username: str) -> None:
         await message.answer(f"У @{username} пока нет переписок с достаточным числом сообщений.")
         return
 
-    parts = [types.Part.from_text(text="\n\n".join(blocks)[-16000:])]
+    payload = "\n\n".join(blocks)[-16000:]
+    parts = [types.Part.from_text(text=payload)]
     thinking = await message.reply(f"🧠 Разбираю диалоги @{username}…")
     try:
-        text = await asyncio.to_thread(ask_model, parts, [], REPLY_INSTRUCTION, False, True)
+        text = await asyncio.to_thread(
+            ask_model, parts, [], with_pair_hint(REPLY_INSTRUCTION, username + payload), False, True
+        )
     except Exception:
         log.exception("Ошибка разбора диалогов")
         await thinking.delete()
