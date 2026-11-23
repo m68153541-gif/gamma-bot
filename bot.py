@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import os
+import random
 import re
 import time
 from datetime import datetime, timezone
@@ -33,19 +34,23 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 DEFAULT_MODEL = "gemini-3.5-flash-lite"
+DEFAULT_FALLBACKS = ",gemini-3.1-flash-lite,gemini-flash-lite-latest,gemini-2.0-flash-lite"
 MODELS = [
     m.strip()
-    for m in os.getenv("MODELS", DEFAULT_MODEL + ",gemini-3.1-flash-lite").split(",")
+    for m in os.getenv("MODELS", DEFAULT_MODEL + DEFAULT_FALLBACKS).split(",")
     if m.strip()
 ]
 
 ANALYSIS_API_KEY = os.getenv("ANALYSIS_API_KEY", "").strip() or GEMINI_API_KEY
-ANALYSIS_CHARS = int(os.getenv("ANALYSIS_CHARS", "1400"))
+ANALYSIS_CHARS = int(os.getenv("ANALYSIS_CHARS", "8000"))
 ANALYSIS_MODELS = [
     m.strip()
-    for m in os.getenv("ANALYSIS_MODELS", DEFAULT_MODEL + ",gemini-3.1-flash-lite").split(",")
+    for m in os.getenv("ANALYSIS_MODELS", DEFAULT_MODEL + DEFAULT_FALLBACKS).split(",")
     if m.strip()
 ]
+
+ASK_DEADLINE_SECONDS = float(os.getenv("ASK_DEADLINE_SECONDS", "100"))
+RETRY_MAX_ATTEMPTS = int(os.getenv("RETRY_MAX_ATTEMPTS", "3"))
 
 COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "5"))
 OWNER_CODE = os.getenv("OWNER_CODE", "").strip()
@@ -165,7 +170,7 @@ dp = Dispatcher()
 last_request: dict[int, float] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.22.5"
+BOT_VERSION = "1.22.6"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -656,9 +661,13 @@ async def self_profile(message: Message) -> bool:
     user_id = message.from_user.id
     total = store.user_count_message(user_id)
     rows = store.archive(user_id, 200)
-    digest = "\n".join(
-        ("Я: " if role == "model" else "Пользователь: ") + text.replace("\n", " ") for role, text in rows
-    )[-12000:]
+    digest = clip_payload(
+        "\n".join(
+            ("Я: " if role == "model" else "Пользователь: ") + text.replace("\n", " ")
+            for role, text in rows
+        ),
+        12000,
+    )
     peers = relationship_blocks(user_id)
 
     if total < 2 and not peers:
@@ -672,7 +681,7 @@ async def self_profile(message: Message) -> bool:
         instruction = SELF_PROFILE_WITH_MAP
         payload = (
             f"Переписка со мной:\n\n{digest or '(почти нет)'}\n\n"
-            "Переписки с другими людьми:\n\n" + "\n\n".join(peers)[-ANALYSIS_CHARS:]
+            "Переписки с другими людьми:\n\n" + clip_payload("\n\n".join(peers))
         )
     else:
         instruction = SELF_PROFILE_INSTRUCTION
@@ -688,10 +697,10 @@ async def self_profile(message: Message) -> bool:
             False,
             True,
         )
-    except Exception:
+    except Exception as exc:
         log.exception("Ошибка сборки профиля")
         await thinking.delete()
-        await message.answer("Не получилось собрать профиль, попробуй чуть позже.")
+        await message.answer(ask_error_text(exc, "Не получилось собрать профиль, попробуй чуть позже."))
         return True
 
     await thinking.delete()
@@ -781,7 +790,7 @@ async def show_chat(
             "Напишите друг другу пару сообщений словами, и я всё покажу."
         )
         return True
-    digest = "\n".join(digest_line(item, owner, peer) for item in texts[-60:])[-ANALYSIS_CHARS:]
+    digest = clip_payload("\n".join(digest_line(item, owner, peer) for item in texts[-60:]))
     owner = owner or account or "владелец"
     header = (
         f"Переписка двух участников: @{owner} (владелец аккаунта) и @{peer or peer_name}. "
@@ -794,10 +803,12 @@ async def show_chat(
         text = await asyncio.to_thread(
             ask_model, parts, [], with_pair_hint(PROFILE_INSTRUCTION, payload), False, True
         )
-    except Exception:
+    except Exception as exc:
         log.exception("Ошибка анализа переписки")
         await thinking.delete()
-        await message.answer("Не получилось разобрать переписку, попробуй ещё раз чуть позже.")
+        await message.answer(
+            ask_error_text(exc, "Не получилось разобрать переписку, попробуй ещё раз чуть позже.")
+        )
         return True
 
     await thinking.delete()
@@ -888,17 +899,17 @@ async def describe_account(message: Message, cids: list[str], username: str) -> 
     if not blocks:
         await message.answer(f"У @{username} в базе пока нет чатов — нечего разбирать.")
         return True
-    payload = "\n\n".join(blocks)[-ANALYSIS_CHARS:]
+    payload = clip_payload("\n\n".join(blocks))
     parts = [types.Part.from_text(text=payload)]
     thinking = await message.reply(f"🧠 Смотрю переписки аккаунта @{username}…")
     try:
         text = await asyncio.to_thread(
             ask_model, parts, [], with_pair_hint(ACCOUNT_INSTRUCTION, username + payload), False, True
         )
-    except Exception:
+    except Exception as exc:
         log.exception("Ошибка разбора аккаунта")
         await thinking.delete()
-        await message.answer("Не получилось разобрать аккаунт, попробуй позже.")
+        await message.answer(ask_error_text(exc, "Не получилось разобрать аккаунт, попробуй позже."))
         return True
     await thinking.delete()
     for chunk in split_text(text):
@@ -1054,6 +1065,47 @@ async def broadcast(bot: Bot, text: str) -> tuple[int, int]:
     return ok, failed
 
 
+def clip_payload(text: str, limit: int = ANALYSIS_CHARS) -> str:
+    if len(text) <= limit:
+        return text
+    head_size = limit // 4
+    tail_size = limit - head_size - 3
+    return f"{text[:head_size]}\n…\n{text[-tail_size:]}"
+
+
+TRANSIENT_CODES = {408, 429, 500, 502, 503, 504}
+TRANSIENT_WORDS = (
+    "unavailable",
+    "resource_exhausted",
+    "deadline_exceeded",
+    "internal",
+    "high demand",
+    "overloaded",
+    "timeout",
+    "timed out",
+    "connection",
+)
+
+
+def is_transient(exc: Exception) -> bool:
+    code = getattr(exc, "code", None)
+    if code is None:
+        code = getattr(exc, "status_code", None)
+    try:
+        if int(code) in TRANSIENT_CODES:
+            return True
+    except (TypeError, ValueError):
+        pass
+    text = f"{type(exc).__name__} {exc}".lower()
+    return any(word in text for word in TRANSIENT_WORDS)
+
+
+def ask_error_text(exc: Exception, fallback: str) -> str:
+    if is_transient(exc):
+        return "Модель сейчас перегружена — напиши ещё раз через минуту, переписка никуда не денется."
+    return fallback
+
+
 def ask_model(
     parts: list,
     past: list[types.Content],
@@ -1069,10 +1121,13 @@ def ask_model(
     else:
         attempts.append((client, MODELS))
 
+    deadline = time.monotonic() + ASK_DEADLINE_SECONDS
     last_error: Exception | None = None
     for api, models in attempts:
         for model in models:
-            for attempt in range(3):
+            for attempt in range(RETRY_MAX_ATTEMPTS):
+                if time.monotonic() >= deadline:
+                    raise last_error or RuntimeError("Модели не ответили за отведённое время")
                 try:
                     response = api.models.generate_content(
                         model=model,
@@ -1080,14 +1135,30 @@ def ask_model(
                         config=types.GenerateContentConfig(
                             system_instruction=instruction,
                             temperature=0.3,
-                            max_output_tokens=900 if analysis else 2048,
+                            max_output_tokens=1800 if analysis else 2048,
                         ),
                     )
                 except Exception as exc:
                     last_error = exc
-                    wait = 2 * (attempt + 1)
+                    if not is_transient(exc):
+                        log.warning(
+                            "Модель %s отклонила запрос (%s) — беру следующую",
+                            model,
+                            type(exc).__name__,
+                        )
+                        break
+                    left = deadline - time.monotonic()
+                    if left <= 1:
+                        log.warning(
+                            "Модель %s перегружена (%s), время ожидания вышло",
+                            model,
+                            type(exc).__name__,
+                        )
+                        break
+                    wait = min(3 * 2**attempt, 20) + random.uniform(0, 1.5)
+                    wait = min(wait, left)
                     log.warning(
-                        "Модель %s не ответила (%s), повтор через %s с",
+                        "Модель %s перегружена (%s), повтор через %.0f с",
                         model,
                         type(exc).__name__,
                         wait,
@@ -1098,6 +1169,8 @@ def ask_model(
                 cleaned = clean_reply(raw)
                 if not re.search(r"[A-Za-zА-Яа-яЁё0-9]", cleaned):
                     last_error = RuntimeError("Модель вернула пустой ответ")
+                    log.warning("Модель %s вернула пустой ответ, пробую ещё раз", model)
+                    time.sleep(1.5)
                     continue
                 return calm_names(ensure_emojis(cleaned), force=guard)
     raise last_error or RuntimeError("Нет доступных моделей")
@@ -1131,8 +1204,11 @@ async def answer(message: Message, parts: list, user_text: str) -> None:
     except Exception as exc:
         log.exception("Ошибка запроса к модели")
         await message.reply(
-            "😔 Не получилось получить ответ. Попробуй ещё раз чуть позже.\n"
-            f"Техническая деталь: {type(exc).__name__}"
+            ask_error_text(
+                exc,
+                "😔 Не получилось получить ответ. Попробуй ещё раз чуть позже.\n"
+                f"Техническая деталь: {type(exc).__name__}",
+            )
         )
         return
 
@@ -1248,17 +1324,17 @@ async def reply_report(message: Message, username: str) -> None:
         await message.answer(f"У @{username} пока нет переписок с достаточным числом сообщений.")
         return
 
-    payload = "\n\n".join(blocks)[-ANALYSIS_CHARS:]
+    payload = clip_payload("\n\n".join(blocks))
     parts = [types.Part.from_text(text=payload)]
     thinking = await message.reply(f"🧠 Разбираю диалоги @{username}…")
     try:
         text = await asyncio.to_thread(
             ask_model, parts, [], with_pair_hint(REPLY_INSTRUCTION, username + payload), False, True
         )
-    except Exception:
+    except Exception as exc:
         log.exception("Ошибка разбора диалогов")
         await thinking.delete()
-        await message.answer("Не получилось разобрать диалоги, попробуй позже.")
+        await message.answer(ask_error_text(exc, "Не получилось разобрать диалоги, попробуй позже."))
         return
 
     await thinking.delete()
