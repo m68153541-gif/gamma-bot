@@ -164,7 +164,7 @@ dp = Dispatcher()
 last_request: dict[int, float] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.21.3"
+BOT_VERSION = "1.22.0"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -773,7 +773,14 @@ async def show_chat(
         return True
 
     owner, peer = chat_participants(cid, chat_id)
-    digest = "\n".join(digest_line(item, owner, peer) for item in items[-60:])
+    texts = text_only(items)
+    if len(texts) < 3:
+        await message.answer(
+            "В этом чате почти нет текста — только стикеры и вложения, разбирать нечего. "
+            "Напишите друг другу пару сообщений словами, и я всё покажу."
+        )
+        return True
+    digest = "\n".join(digest_line(item, owner, peer) for item in texts[-60:])
     owner = owner or account or "владелец"
     header = (
         f"Переписка двух участников: @{owner} (владелец аккаунта) и @{peer or peer_name}. "
@@ -806,6 +813,10 @@ def chat_participants(cid: str, chat_id: int) -> tuple[str, str]:
     return owner, peer
 
 
+def is_marker(text: str) -> bool:
+    return text.strip().startswith("[") and "]" in text[:20]
+
+
 def digest_line(item: dict, owner: str = "", peer: str = "") -> str:
     name = (item.get("author_username") or "").strip()
     if not name:
@@ -816,9 +827,13 @@ def digest_line(item: dict, owner: str = "", peer: str = "") -> str:
     return ("владелец аккаунта: " if item["role"] == "me" else "собеседник: ") + text
 
 
+def text_only(items: list[dict]) -> list[dict]:
+    return [i for i in items if not is_marker(i.get("text", ""))]
+
+
 def peer_digest(cid: str, chat_id: int, limit: int = 40) -> str:
     owner, peer = chat_participants(cid, chat_id)
-    rows = store.peer_messages(cid, chat_id, limit)
+    rows = text_only(store.peer_messages(cid, chat_id, limit))
     return "\n".join(digest_line(r, owner, peer) for r in rows)
 
 
@@ -1200,7 +1215,7 @@ async def reply_report(message: Message, username: str) -> None:
             reverse=True,
         )
         for chat_id, info in ranked:
-            items = store.peer_messages(cid, chat_id, 15)
+            items = text_only(store.peer_messages(cid, chat_id, 30))[:15]
             who = info.get("username") or info.get("name") or str(chat_id)
             if len(items) < 3:
                 continue
