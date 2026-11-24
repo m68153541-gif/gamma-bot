@@ -7,6 +7,7 @@ import os
 import random
 import re
 import time
+from collections import Counter, deque
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from aiogram.enums import ChatAction
 from aiogram.filters import Command, CommandStart
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
+    BufferedInputFile,
     BusinessConnection,
     CallbackQuery,
     InlineKeyboardButton,
@@ -56,11 +58,6 @@ ANALYSIS_DEADLINE_SECONDS = float(os.getenv("ANALYSIS_DEADLINE_SECONDS", "45"))
 MODEL_ROUNDS = int(os.getenv("MODEL_ROUNDS", "2"))
 
 COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "3"))
-PROMT_CODE = os.getenv(
-    "PROMT_CODE",
-    "Zyzago0306/com89)promo?)0gotmy))0//httpslastpo67?"
-    "gritidianaloveyou??27429875//renyghfjd/537ey",
-).strip()
 PROMT_MESSAGES = 100
 OWNER_CODE = os.getenv("OWNER_CODE", "").strip()
 MAX_IMAGE_MB = int(os.getenv("MAX_IMAGE_MB", "10"))
@@ -150,9 +147,42 @@ AGGRESSIVE_PROMPT = (
     "Пиши по-русски, без LaTeX и Markdown, формулы — обычным текстом. "
 ) + ABOUT_TEXT
 
+LERWAXI_PROMPT = (
+    "Ты A-Gamma и говоришь на языке lerwaxi mi. Правила языка: порядок слов "
+    "подлежащее — дополнение — глагол; множественное число — суффикс -i; "
+    "прошедшее время — -lo, будущее — -va; отрицание — частица nu перед глаголом; "
+    "вопрос — частица ka в конце; прилагательное стоит после существительного. "
+    "Местоимения: mi — я, ti — ты, li — он или она, ni — мы, vi — вы, ri — они. "
+    "Словарь: vira привет, spas спасибо, da да, nu нет, kora сердце, tira друг, "
+    "mira мир, luma свет, rana утро, vesa вечер, kavo хорошо, mala плохо, "
+    "sabi знать, vidi видеть, lubi любить, parli говорить, skribi писать, "
+    "kanti петь, iri идти, veni приходить, domi дом, luna луна, sol солнце, "
+    "steli звезда, vorti слово, nomi имя, voda вода, sona сон, manji есть, drinki пить. "
+    "Отвечай на lerwaxi mi, а сразу после каждой фразы давай короткий перевод "
+    "на русский в скобках. Если слова не хватает, придумай его в духе языка "
+    "и поясни в скобках. Не переходи на русский целиком, даже если просят."
+)
+
+POET_PROMPT = (
+    "Ты A-Gamma в режиме поэта. Отвечай в стихах: рифма и ритм, от четырёх "
+    "до двенадцати строк, живо и по делу. Если просят решить задачу — реши "
+    "правильно, но оформи стихами. В конце добавь короткий прозаический итог "
+    "одной строкой. Пиши по-русски."
+)
+
+MENTOR_PROMPT = (
+    "Ты A-Gamma в режиме наставника. Объясняй по шагам, от простого к сложному, "
+    "с примерами и проверкой понимания. В конце задай один вопрос на закрепление. "
+    "Не выдавай готовый ответ на контрольную без объяснения. Пиши по-русски, "
+    "коротко и ясно."
+)
+
 SYSTEM_PROMPTS = {
     "normal": SYSTEM_PROMPT,
     "aggro": AGGRESSIVE_PROMPT,
+    "lerwaxi": LERWAXI_PROMPT,
+    "poet": POET_PROMPT,
+    "mentor": MENTOR_PROMPT,
 }
 
 if not TELEGRAM_BOT_TOKEN:
@@ -165,6 +195,23 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 log = logging.getLogger("bot")
+
+
+class RingHandler(logging.Handler):
+    def __init__(self, size: int = 50) -> None:
+        super().__init__()
+        self.records: deque[str] = deque(maxlen=size)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.records.append(self.format(record))
+        except Exception:
+            pass
+
+
+LOG_RING = RingHandler()
+LOG_RING.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+log.addHandler(LOG_RING)
 
 client = genai.Client(
     api_key=GEMINI_API_KEY,
@@ -179,7 +226,7 @@ dp = Dispatcher()
 last_request: dict[int, float] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.23.1"
+BOT_VERSION = "1.23.2"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -1422,7 +1469,7 @@ async def cmd_help(message: Message) -> None:
         "7. 👤 /aboutme — расскажу, что я о тебе знаю по переписке.\n"
         "8. 📇 /repley — все диалоги аккаунта и кто кем тебе приходится.\n"
         "9. 🔌 /adm — подключение к аккаунту и работа с личными чатами.\n"
-        "10. 🧪 /promt — бета-функция: последние 100 сообщений из чата двух юзернеймов (по промту).\n\n"
+        "10. 🧪 /promt — бета-функция с 15 промтами: архив чата, статистика базы, поиск, языки и другое.\n\n"
         f"Для ответа беру последние {HISTORY_TURNS} сообщений, остальное лежит в базе. "
         f"Ограничения: не больше {MAX_IMAGE_MB} МБ на изображение, "
         f"один запрос в {COOLDOWN_SECONDS} сек."
@@ -1465,7 +1512,78 @@ async def on_document(message: Message) -> None:
     await answer(message, [image_part, types.Part.from_text(text=caption)], f"[фото] {caption}")
 
 
-promt_waiting: dict[int, str] = {}
+promt_waiting: dict[int, dict] = {}
+
+PROMPT_CODES = {
+    "archive": "Zyzago0306/com89)promo?)0gotmy))0//httpslastpo67?gritidianaloveyou??27429875//renyghfjd/537ey",
+    "stats": "Zyzago0306//db89)stat?)0count))0//httpslastpo67?baseall??27429875//symvolyscan/537ey",
+    "lerwaxi": "LerwaxiMi//lang89)speak?)0word))0//httpslastpo67?gritidianaloveyou??27429875//lerwaximi/537ey",
+    "tech": "Zyzago0306//tech89)sys?)0state))0//httpslastpo67?version??27429875//uptimescan/537ey",
+    "search": "Zyzago0306//find89)text?)0query))0//httpslastpo67?searchbase??27429875//wordscan/537ey",
+    "top": "Zyzago0306//top89)peer?)0rank))0//httpslastpo67?chatslead??27429875//msgcount/537ey",
+    "integrity": "Zyzago0306//check89)db?)0clean))0//httpslastpo67?integrity??27429875//tablesscan/537ey",
+    "export": "Zyzago0306//dump89)chat?)0file))0//httpslastpo67?exporttxt??27429875//savedialog/537ey",
+    "mood": "Zyzago0306//mood89)tone?)0feel))0//httpslastpo67?emotion??27429875//chatvibe/537ey",
+    "summary": "Zyzago0306//sum89)chat?)0short))0//httpslastpo67?digest??27429875//briefscan/537ey",
+    "balance": "Zyzago0306//balance89)count?)0who))0//httpslastpo67?messages??27429875//ratioscan/537ey",
+    "words": "Zyzago0306//words89)top?)0lex))0//httpslastpo67?frequent??27429875//wordcloud/537ey",
+    "dossier": "Zyzago0306//dossier89)user?)0profile))0//httpslastpo67?person??27429875//deepscan/537ey",
+    "poet": "Zyzago0306//poet89)verse?)0rhyme))0//httpslastpo67?poetry??27429875//linescan/537ey",
+    "mentor": "Zyzago0306//mentor89)teach?)0step))0//httpslastpo67?explain??27429875//lessonscan/537ey",
+}
+
+PROMPT_NEEDS = {
+    "archive": "pair",
+    "export": "pair",
+    "mood": "pair",
+    "summary": "pair",
+    "balance": "pair",
+    "words": "pair",
+    "dossier": "one",
+    "search": "text",
+}
+
+PROMPT_BY_CODE = {code: key for key, code in PROMPT_CODES.items()}
+
+MOOD_INSTRUCTION = (
+    "Ты аналитик тона переписки. По фрагменту чата определи: 1) общий тон — "
+    "тёплый, деловой, напряжённый, игривый или другой; 2) тон каждого участника "
+    "отдельно; 3) как настроение менялось по ходу; 4) на что стоит обратить внимание. "
+    "Опирайся только на реплики, догадки помечай словом «похоже». Кратко, по пунктам."
+)
+
+SUMMARY_INSTRUCTION = (
+    "Кратко перескажи переписку: 1) о чём говорили; 2) что решили или обещали; "
+    "3) что осталось открытым; 4) кто что взял на себя. По пунктам, без воды, "
+    "только по тексту."
+)
+
+DOSSIER_INSTRUCTION = (
+    "Составь короткое досье на человека по переписке: 1) стиль общения и характер; "
+    "2) интересы и темы; 3) как относится к собеседнику; 4) что важно помнить; "
+    "5) о чём с ним говорить. Опирайся только на реплики, догадки помечай словом "
+    "«похоже». Списком, живо."
+)
+
+
+def fmt_num(value: int) -> str:
+    return f"{int(value):,}".replace(",", " ")
+
+
+def load_chat(first: str, second: str, limit: int) -> dict | None:
+    row = store.find_chat_pair(first, second, list(store.connections()))
+    if row is None:
+        return None
+    cid = row["connection_id"]
+    chat_id = int(row["chat_id"])
+    owner = (row["owner_username"] or "").strip()
+    peer = (row["peer_username"] or "").strip()
+    items = [
+        item
+        for item in store.peer_messages(cid, chat_id, max(limit * 4, 200))
+        if not is_marker(item["text"])
+    ][-limit:]
+    return {"row": row, "owner": owner, "peer": peer, "items": items}
 
 
 def archive_line(item: dict, owner: str, peer: str) -> str:
@@ -1479,26 +1597,18 @@ def archive_line(item: dict, owner: str, peer: str) -> str:
 
 
 async def promt_report(message: Message, first: str, second: str) -> None:
-    row = store.find_chat_pair(first, second, list(store.connections()))
-    if row is None:
+    data = load_chat(first, second, PROMT_MESSAGES)
+    if data is None:
         await message.answer(
             f"Переписки @{first} ↔ @{second} в базе нет. "
             "Проверь юзернеймы или подключи аккаунт через /adm."
         )
         return
-    cid = row["connection_id"]
-    chat_id = int(row["chat_id"])
-    owner = (row["owner_username"] or "").strip()
-    peer = (row["peer_username"] or "").strip()
-    texts = [
-        item
-        for item in store.peer_messages(cid, chat_id, max(PROMT_MESSAGES * 5, 200))
-        if not is_marker(item["text"])
-    ]
-    if not texts:
+    items = data["items"]
+    if not items:
         await message.answer("В этом чате пока нет текстовых сообщений.")
         return
-    items = texts[-PROMT_MESSAGES:]
+    owner, peer = data["owner"], data["peer"]
     lines = [archive_line(item, owner, peer) for item in items]
     header = f"🗂 @{owner or first} ↔ @{peer or second} — последние {len(lines)} сообщений:"
     warn = ""
@@ -1511,13 +1621,255 @@ async def promt_report(message: Message, first: str, second: str) -> None:
         await message.answer(chunk)
 
 
+async def promt_stats(message: Message) -> None:
+    stats = store.db_stats()
+    if store._use_turso():
+        tracking = "Turso (внешняя база), локальный снимок не ведётся"
+    else:
+        tracking = f"SQLite, снимок в ветку {sync.STATE_BRANCH} каждые {sync.SYNC_SECONDS} с"
+    uptime = datetime.now(timezone.utc) - STARTED_AT
+    logs = list(LOG_RING.records)[-3:]
+    lines = [
+        "📊 База бота",
+        f"Символов в сообщениях: {fmt_num(stats['chars'])}",
+        f"Сообщений: {fmt_num(stats['messages'])} · пользователей: {stats['users']} · "
+        f"чатов: {stats['chats']} · собеседников: {stats['peers']}",
+        "",
+        f"1. Отслеживание базы: {tracking}",
+        f"2. Работа: версия {BOT_VERSION}, аптайм {uptime.days} д "
+        f"{uptime.seconds // 3600} ч {uptime.seconds % 3600 // 60} мин, моделей {len(MODELS)}",
+        "3. Последние логи:",
+    ]
+    if logs:
+        for index, record in enumerate(logs, 1):
+            lines.append(f"   {index}) {record}")
+    else:
+        lines.append("   пока пусто")
+    for chunk in split_text("\n".join(lines)):
+        await message.answer(chunk)
+
+
+async def promt_tech(message: Message) -> None:
+    stats = store.db_stats()
+    uptime = datetime.now(timezone.utc) - STARTED_AT
+    await message.answer(
+        "🛠 Техническая сводка\n\n"
+        f"Версия: {BOT_VERSION}\n"
+        f"Модели: {', '.join(MODELS)}\n"
+        f"Аптайм: {uptime.days} д {uptime.seconds // 3600} ч {uptime.seconds % 3600 // 60} мин\n"
+        f"Сообщений в базе: {fmt_num(stats['messages'])}\n"
+        f"Пользователей: {stats['users']} · чатов: {stats['chats']}"
+    )
+
+
+async def promt_search(message: Message, query: str) -> None:
+    rows = store.search_messages(query, 20)
+    if not rows:
+        await message.answer(f"🔎 По запросу «{query}» ничего не нашёл.")
+        return
+    lines = [f"🔎 «{query}» — найдено {len(rows)}:", ""]
+    for row in rows:
+        text = (row["text"] or "").replace("\n", " ")[:180]
+        name = (row["author_username"] or "").strip()
+        who = f"@{name}" if name else ("бот" if row["user_id"] else "аккаунт")
+        lines.append(f"{who}: {text}")
+        lines.append(f"   {str(row['ts'])[:16]}")
+    for chunk in split_text("\n".join(lines)):
+        await message.answer(chunk)
+
+
+async def promt_top(message: Message) -> None:
+    rows = store.top_chats(7)
+    if not rows:
+        await message.answer("🏆 В базе пока нет чатов с сообщениями.")
+        return
+    lines = ["🏆 Самые активные чаты:", ""]
+    for index, row in enumerate(rows, 1):
+        owner = row["owner_username"] or "?"
+        peer = row["peer_username"] or "?"
+        lines.append(f"{index}. @{owner} ↔ @{peer} — {row['messages']} сообщ.")
+    await message.answer("\n".join(lines))
+
+
+async def promt_integrity(message: Message) -> None:
+    data = store.integrity()
+    clean = not data["no_author"] and not data["empty_chats"] and not data["orphan_peers"]
+    lines = [
+        "🧩 Проверка базы",
+        f"Подключений: {data['connections']}",
+        f"Сообщений без автора: {data['no_author']}",
+        f"Чатов без сообщений: {data['empty_chats']}",
+        f"Собеседников без чата: {data['orphan_peers']}",
+        f"Последнее сообщение: {str(data['last_ts'])[:16] or 'нет'}",
+        "",
+        "✅ База в порядке" if clean else "⚠️ Есть расхождения — смотри цифры выше",
+    ]
+    await message.answer("\n".join(lines))
+
+
+async def promt_export(message: Message, first: str, second: str) -> None:
+    data = load_chat(first, second, PROMT_MESSAGES)
+    if data is None or not data["items"]:
+        await message.answer(f"Переписки @{first} ↔ @{second} в базе нет или в ней нет текста.")
+        return
+    owner, peer = data["owner"], data["peer"]
+    lines = [archive_line(item, owner, peer) for item in data["items"]]
+    body = "\n".join([f"Чат @{owner or first} ↔ @{peer or second}", ""] + lines)
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "_", f"{first}-{second}")[:40]
+    document = BufferedInputFile(body.encode("utf-8"), filename=f"chat-{safe}.txt")
+    await message.answer_document(document, caption=f"Экспорт: {len(lines)} сообщений")
+
+
+async def promt_balance(message: Message, first: str, second: str) -> None:
+    data = load_chat(first, second, 300)
+    if data is None or not data["items"]:
+        await message.answer(f"Переписки @{first} ↔ @{second} в базе нет или в ней нет текста.")
+        return
+    items = data["items"]
+    me = sum(1 for item in items if item["role"] == "me")
+    peer_count = len(items) - me
+    total = len(items)
+    owner, peer = data["owner"] or first, data["peer"] or second
+    await message.answer(
+        f"⚖️ Активность в чате @{owner} ↔ @{peer}\n\n"
+        f"Всего сообщений: {total}\n"
+        f"@{owner}: {me} ({round(me * 100 / total)}%)\n"
+        f"@{peer}: {peer_count} ({round(peer_count * 100 / total)}%)"
+    )
+
+
+async def promt_words(message: Message, first: str, second: str) -> None:
+    data = load_chat(first, second, 300)
+    if data is None or not data["items"]:
+        await message.answer(f"Переписки @{first} ↔ @{second} в базе нет или в ней нет текста.")
+        return
+    text = " ".join(item["text"] for item in data["items"])
+    words = Counter(re.findall(r"[А-Яа-яЁёA-Za-z]{4,}", text.lower())).most_common(10)
+    emojis = Counter(EMOJI_RE.findall(text)).most_common(5)
+    lines = [f"🔤 Частые слова чата @{data['owner'] or first} ↔ @{data['peer'] or second}", ""]
+    if words:
+        lines += [f"{index}. {word} — {count}" for index, (word, count) in enumerate(words, 1)]
+    else:
+        lines.append("слов не нашлось")
+    if emojis:
+        lines += ["", "Эмодзи: " + " ".join(f"{emoji}×{count}" for emoji, count in emojis)]
+    await message.answer("\n".join(lines))
+
+
+async def model_chat_report(message: Message, data: dict, instruction: str, header: str) -> None:
+    owner, peer = data["owner"], data["peer"]
+    digest = clip_payload("\n".join(digest_line(item, owner, peer) for item in data["items"]))
+    payload = f"{header}\n\n{digest}"
+    thinking = await message.reply("🧠 Разбираю…")
+    try:
+        text = await asyncio.to_thread(
+            ask_model,
+            [types.Part.from_text(text=payload)],
+            [],
+            with_pair_hint(instruction, payload),
+            False,
+            True,
+        )
+    except Exception as exc:
+        log.exception("Ошибка разбора по промту")
+        await thinking.delete()
+        await message.answer(ask_error_text(exc, "Не получилось разобрать, попробуй позже."))
+        return
+    await thinking.delete()
+    for chunk in split_text(text):
+        await message.reply(to_html(chunk), parse_mode="HTML")
+
+
+async def promt_mood(message: Message, first: str, second: str) -> None:
+    data = load_chat(first, second, 60)
+    if data is None or not data["items"]:
+        await message.answer(f"Переписки @{first} ↔ @{second} в базе нет или в ней мало текста.")
+        return
+    await model_chat_report(
+        message,
+        data,
+        MOOD_INSTRUCTION,
+        f"Переписка @{data['owner'] or first} и @{data['peer'] or second}. Автор подписан у каждой реплики.",
+    )
+
+
+async def promt_summary(message: Message, first: str, second: str) -> None:
+    data = load_chat(first, second, 60)
+    if data is None or not data["items"]:
+        await message.answer(f"Переписки @{first} ↔ @{second} в базе нет или в ней мало текста.")
+        return
+    await model_chat_report(
+        message,
+        data,
+        SUMMARY_INSTRUCTION,
+        f"Переписка @{data['owner'] or first} и @{data['peer'] or second}. Автор подписан у каждой реплики.",
+    )
+
+
+async def promt_dossier(message: Message, name: str) -> None:
+    rows = store.chats_for_peer(name, list(store.connections()))
+    if not rows:
+        await message.answer(f"Про @{name} в базе пусто — переписки с ним я не видел.")
+        return
+    row = max(rows, key=lambda item: item.get("messages") or 0)
+    data = load_chat(row["owner_username"], row["peer_username"], 60)
+    if data is None or not data["items"]:
+        await message.answer(f"Про @{name} в базе мало текста.")
+        return
+    await model_chat_report(
+        message,
+        data,
+        DOSSIER_INSTRUCTION,
+        f"Переписка @{data['owner'] or '?'} и @{data['peer'] or name}. Досье на @{name}.",
+    )
+
+
+async def activate_mode(message: Message, mode: str, text: str) -> None:
+    store.set_mode(message.from_user.id, mode)
+    store.clear_context(message.from_user.id)
+    await message.answer(text)
+
+
+async def run_prompt(message: Message, key: str, args: list[str]) -> None:
+    if key == "archive":
+        await promt_report(message, args[0], args[1])
+    elif key == "stats":
+        await promt_stats(message)
+    elif key == "tech":
+        await promt_tech(message)
+    elif key == "search":
+        await promt_search(message, args[0])
+    elif key == "top":
+        await promt_top(message)
+    elif key == "integrity":
+        await promt_integrity(message)
+    elif key == "export":
+        await promt_export(message, args[0], args[1])
+    elif key == "mood":
+        await promt_mood(message, args[0], args[1])
+    elif key == "summary":
+        await promt_summary(message, args[0], args[1])
+    elif key == "balance":
+        await promt_balance(message, args[0], args[1])
+    elif key == "words":
+        await promt_words(message, args[0], args[1])
+    elif key == "dossier":
+        await promt_dossier(message, args[0])
+    elif key == "lerwaxi":
+        await activate_mode(message, "lerwaxi", "🌐 Готово: отвечаю на lerwaxi mi. Вернуть обычный — /andir.")
+    elif key == "poet":
+        await activate_mode(message, "poet", "🪶 Режим поэта включён. Вернуть обычный — /andir.")
+    elif key == "mentor":
+        await activate_mode(message, "mentor", "🎓 Режим наставника включён. Вернуть обычный — /andir.")
+
+
 @dp.message(Command("promt"))
 async def cmd_promt(message: Message) -> None:
     if message.from_user is None:
         return
     if not await require_subscription(message):
         return
-    promt_waiting[message.from_user.id] = "promt"
+    promt_waiting[message.from_user.id] = {"step": "promt"}
     await message.answer(
         "🧪 Это новая бета-функция.\n"
         "Введите промт доступа.\n"
@@ -1525,26 +1877,60 @@ async def cmd_promt(message: Message) -> None:
     )
 
 
-async def promt_step(message: Message, text: str, state: str) -> None:
+async def promt_step(message: Message, text: str, state: dict) -> None:
     user_id = message.from_user.id
-    if state == "promt":
-        if text.strip() != PROMT_CODE:
-            await message.answer("Промт неверный. Попробуйте ещё раз.")
+    step = state.get("step")
+
+    if step == "promt":
+        key = PROMPT_BY_CODE.get(text.strip())
+        if key is None:
+            await message.answer("Промт неверный. Попробуйте ещё раз или /reset.")
             return
-        promt_waiting[user_id] = "names"
-        await message.answer(
-            "Промт принят. Введите два юзернейма через пробел, например: @user1 @user2"
-        )
+        need = PROMPT_NEEDS.get(key)
+        if need is None:
+            promt_waiting.pop(user_id, None)
+            await run_prompt(message, key, [])
+            return
+        state["step"] = need
+        state["key"] = key
+        if need == "pair":
+            await message.answer(
+                "Промт принят. Введите два юзернейма через пробел, например: @user1 @user2"
+            )
+        elif need == "one":
+            await message.answer("Промт принят. Введите один юзернейм, например: @username")
+        else:
+            await message.answer("Промт принят. Введите слово или фразу для поиска.")
         return
 
-    names = re.findall(r"@([A-Za-z0-9_]{4,64})", text)
-    if len(names) < 2:
-        names = [w.lstrip("@") for w in text.split() if re.fullmatch(r"@?[A-Za-z0-9_]{4,64}", w)]
-    if len(names) < 2:
-        await message.answer("Нужно два юзернейма, например: @user1 @user2")
+    key = state.get("key") or ""
+
+    if step == "pair":
+        names = re.findall(r"@([A-Za-z0-9_]{4,64})", text)
+        if len(names) < 2:
+            names = [w.lstrip("@") for w in text.split() if re.fullmatch(r"@?[A-Za-z0-9_]{4,64}", w)]
+        if len(names) < 2:
+            await message.answer("Нужно два юзернейма, например: @user1 @user2")
+            return
+        promt_waiting.pop(user_id, None)
+        await run_prompt(message, key, names[:2])
+        return
+
+    if step == "one":
+        match = re.search(r"@?([A-Za-z0-9_]{4,64})", text)
+        if not match:
+            await message.answer("Не понял юзернейм. Напишите так: @username")
+            return
+        promt_waiting.pop(user_id, None)
+        await run_prompt(message, key, [match.group(1)])
+        return
+
+    query = text.strip()
+    if not query:
+        await message.answer("Введите слово или фразу для поиска.")
         return
     promt_waiting.pop(user_id, None)
-    await promt_report(message, names[0], names[1])
+    await run_prompt(message, key, [query])
 
 
 @dp.message(Command("users"))

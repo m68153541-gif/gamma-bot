@@ -595,3 +595,53 @@ def backfill_chats(connections: dict[str, dict]) -> int:
             )
             made += 1
     return made
+
+
+def db_stats() -> dict:
+    msg = _rows("SELECT COUNT(*) AS msgs, COALESCE(SUM(LENGTH(text)), 0) AS chars FROM messages")
+    users = _rows("SELECT COUNT(*) AS c FROM users")
+    chats = _rows("SELECT COUNT(*) AS c FROM chats")
+    peers = _rows("SELECT COUNT(*) AS c FROM peers")
+    return {
+        "messages": int(msg[0]["msgs"]) if msg else 0,
+        "chars": int(msg[0]["chars"]) if msg else 0,
+        "users": int(users[0]["c"]) if users else 0,
+        "chats": int(chats[0]["c"]) if chats else 0,
+        "peers": int(peers[0]["c"]) if peers else 0,
+    }
+
+
+def search_messages(query: str, limit: int = 20) -> list[dict]:
+    q = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return _rows(
+        "SELECT user_id, role, text, ts, author_username, connection_id, chat_id"
+        " FROM messages WHERE text LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT ?",
+        (f"%{q}%", limit),
+    )
+
+
+def top_chats(limit: int = 7) -> list[dict]:
+    return _rows(
+        "SELECT owner_username, peer_username, messages FROM chats ORDER BY messages DESC LIMIT ?",
+        (limit,),
+    )
+
+
+def integrity() -> dict:
+    no_author = _rows(
+        "SELECT COUNT(*) AS c FROM messages WHERE connection_id IS NOT NULL"
+        " AND (author_username IS NULL OR author_username = '')"
+    )
+    empty = _rows("SELECT COUNT(*) AS c FROM chats WHERE messages <= 0")
+    orphan = _rows(
+        "SELECT COUNT(*) AS c FROM peers p WHERE NOT EXISTS ("
+        "SELECT 1 FROM chats c WHERE c.connection_id = p.connection_id AND c.chat_id = p.chat_id)"
+    )
+    last = _rows("SELECT MAX(ts) AS ts FROM messages")
+    return {
+        "connections": len(connections()),
+        "no_author": int(no_author[0]["c"]) if no_author else 0,
+        "empty_chats": int(empty[0]["c"]) if empty else 0,
+        "orphan_peers": int(orphan[0]["c"]) if orphan else 0,
+        "last_ts": (last[0]["ts"] if last and last[0]["ts"] else ""),
+    }
