@@ -57,7 +57,7 @@ MODEL_ROUNDS = int(os.getenv("MODEL_ROUNDS", "2"))
 
 COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "3"))
 ARHIV_PASSWORD = os.getenv("ARHIV_PASSWORD", "0306").strip()
-ARHIV_MESSAGES = 30
+ARHIV_MESSAGES = 100
 OWNER_CODE = os.getenv("OWNER_CODE", "").strip()
 MAX_IMAGE_MB = int(os.getenv("MAX_IMAGE_MB", "10"))
 HISTORY_TURNS = int(os.getenv("HISTORY_TURNS", "8"))
@@ -175,7 +175,7 @@ dp = Dispatcher()
 last_request: dict[int, float] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.22.8"
+BOT_VERSION = "1.22.9"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -1384,7 +1384,7 @@ async def cmd_help(message: Message) -> None:
         "7. 👤 /aboutme — расскажу, что я о тебе знаю по переписке.\n"
         "8. 📇 /repley — все диалоги аккаунта и кто кем тебе приходится.\n"
         "9. 🔌 /adm — подключение к аккаунту и работа с личными чатами.\n"
-        "10. 🗂 /arhiv — последние 30 сообщений из чата двух юзернеймов (по паролю).\n\n"
+        "10. 🗂 /arhiv — последние 100 сообщений из чата двух юзернеймов (по паролю).\n\n"
         f"Для ответа беру последние {HISTORY_TURNS} сообщений, остальное лежит в базе. "
         f"Ограничения: не больше {MAX_IMAGE_MB} МБ на изображение, "
         f"один запрос в {COOLDOWN_SECONDS} сек."
@@ -1450,17 +1450,24 @@ async def arhiv_report(message: Message, first: str, second: str) -> None:
     chat_id = int(row["chat_id"])
     owner = (row["owner_username"] or "").strip()
     peer = (row["peer_username"] or "").strip()
-    items = [
+    texts = [
         item
-        for item in store.peer_messages(cid, chat_id, ARHIV_MESSAGES * 3)
+        for item in store.peer_messages(cid, chat_id, max(ARHIV_MESSAGES * 5, 200))
         if not is_marker(item["text"])
-    ][-ARHIV_MESSAGES:]
-    if not items:
+    ]
+    if not texts:
         await message.answer("В этом чате пока нет текстовых сообщений.")
         return
+    items = texts[-ARHIV_MESSAGES:]
     lines = [archive_line(item, owner, peer) for item in items]
     header = f"🗂 @{owner or first} ↔ @{peer or second} — последние {len(lines)} сообщений:"
-    for chunk in split_text("\n".join([header, ""] + lines)):
+    warn = ""
+    if len(items) < ARHIV_MESSAGES:
+        warn = (
+            f"⚠️ В базе только {len(items)} сообщ. из {ARHIV_MESSAGES} — "
+            "отправляю всё, что есть.\n\n"
+        )
+    for chunk in split_text(warn + "\n".join([header, ""] + lines)):
         await message.answer(chunk)
 
 
