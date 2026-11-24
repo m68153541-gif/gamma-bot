@@ -179,7 +179,7 @@ dp = Dispatcher()
 last_request: dict[int, float] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.23.0"
+BOT_VERSION = "1.23.1"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -309,9 +309,13 @@ def calm_names(text: str, force: bool = False) -> str:
 
 class UserTracker(BaseMiddleware):
     async def __call__(self, handler, event, data):
-        if isinstance(event, Message) and event.from_user is not None:
+        if (
+            isinstance(event, Message)
+            and event.from_user is not None
+            and not event.business_connection_id
+        ):
             try:
-                register_user(event.from_user, event.chat.id)
+                await asyncio.to_thread(register_user, event.from_user, event.chat.id)
             except Exception:
                 log.exception("Не удалось учесть пользователя")
         return await handler(event, data)
@@ -433,6 +437,25 @@ PROFILE_INSTRUCTION = (
 )
 
 
+conn_cache: dict[str, tuple[float, dict]] = {}
+CONN_CACHE_SECONDS = 300
+
+
+def cache_connection(cid: str, info: dict) -> None:
+    conn_cache[cid] = (time.monotonic(), info)
+
+
+def known_connection(cid: str) -> dict | None:
+    hit = conn_cache.get(cid)
+    now = time.monotonic()
+    if hit is not None and now - hit[0] < CONN_CACHE_SECONDS:
+        return hit[1]
+    info = store.connection(cid)
+    if info is not None:
+        cache_connection(cid, info)
+    return info
+
+
 @dp.business_connection()
 async def on_business_connection(connection: BusinessConnection) -> None:
     rights = connection.rights.model_dump() if connection.rights else {}
@@ -445,6 +468,7 @@ async def on_business_connection(connection: BusinessConnection) -> None:
         "rights": rights,
     }
     store.save_connection(connection.id, info)
+    cache_connection(connection.id, info)
     log.info(
         "Business-подключение %s: %s (@%s), активно=%s, чтение=%s, ответ=%s",
         connection.id,
@@ -464,6 +488,17 @@ async def refresh_connection(bot: Bot, cid: str) -> None:
         return
     rights = connection.rights.model_dump() if connection.rights else {}
     store.save_connection(
+        cid,
+        {
+            "user_id": connection.user.id,
+            "username": connection.user.username or "",
+            "name": connection.user.full_name,
+            "enabled": connection.is_enabled,
+            "can_reply": connection.can_reply,
+            "rights": rights,
+        },
+    )
+    cache_connection(
         cid,
         {
             "user_id": connection.user.id,
@@ -501,29 +536,25 @@ async def remember_business_message(message: Message) -> None:
         else:
             text = "[сообщение]"
 
-    known = store.connections().get(cid)
+    known = known_connection(cid)
     if known is None:
-        store.save_connection(
-            cid,
-            {
-                "user_id": None,
-                "username": "",
-                "name": "подключённый аккаунт",
-                "enabled": True,
-                "can_reply": True,
-                "rights": {},
-            },
-        )
+        info = {
+            "user_id": None,
+            "username": "",
+            "name": "подключённый аккаунт",
+            "enabled": True,
+            "can_reply": True,
+            "rights": {},
+        }
+        store.save_connection(cid, info)
+        cache_connection(cid, info)
         log.info("Подхватил подключение %s из входящего сообщения", cid)
-        known = store.connections().get(cid) or {}
+        known = info
 
     owner_id = known.get("user_id")
     from_me = message.from_user is not None and owner_id is not None and message.from_user.id == owner_id
     username = message.chat.username or (message.from_user.username if message.from_user else "") or ""
     name = message.chat.full_name if getattr(message.chat, "full_name", None) else ""
-
-    store.add_peer(cid, message.chat.id, username, name)
-    store.upsert_chat(cid, message.chat.id, known.get("username") or "", username, name)
 
     sender = message.from_user
     author_username = ""
@@ -535,11 +566,14 @@ async def remember_business_message(message: Message) -> None:
     elif from_me:
         author_username = known.get("username") or ""
 
-    store.add_message(
+    store.save_business_message(
+        cid,
+        message.chat.id,
+        known.get("username") or "",
+        username,
+        name,
         "me" if from_me else "peer",
         text,
-        connection_id=cid,
-        chat_id=message.chat.id,
         author_id=sender.id if sender is not None else None,
         author_username=author_username,
     )
@@ -1198,7 +1232,7 @@ async def answer(message: Message, parts: list, user_text: str) -> None:
         return
     last_request[user_id] = now
 
-    mode, rows = store.prepare_answer(user_id, user_text, HISTORY_TURNS)
+    mode, rows = await asyncio.to_thread(store.prepare_answer, user_id, user_text, HISTORY_TURNS)
     past = [
         types.Content(role=role, parts=[types.Part.from_text(text=text)])
         for role, text in rows
@@ -1226,7 +1260,7 @@ async def answer(message: Message, parts: list, user_text: str) -> None:
         )
         return
 
-    store.add_message("model", text, user_id=user_id)
+    await asyncio.to_thread(store.add_message, "model", text, user_id=user_id)
 
     for chunk in split_text(text):
         await message.reply(to_html(chunk), parse_mode="HTML")

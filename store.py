@@ -326,6 +326,63 @@ def connections() -> dict[str, dict]:
     return result
 
 
+def connection(connection_id: str) -> dict | None:
+    rows = _rows("SELECT info FROM connections WHERE connection_id = ?", (connection_id,))
+    if not rows:
+        return None
+    try:
+        return json.loads(rows[0]["info"])
+    except Exception:
+        return None
+
+
+def save_business_message(
+    connection_id: str,
+    chat_id: int,
+    owner_username: str,
+    peer_username: str,
+    peer_name: str,
+    role: str,
+    text: str,
+    author_id: int | None = None,
+    author_username: str = "",
+) -> None:
+    stamp = now_iso()
+    statements = [
+        (
+            "INSERT INTO peers (connection_id, chat_id, username, name, last_seen) VALUES (?, ?, ?, ?, ?)"
+            " ON CONFLICT(connection_id, chat_id) DO UPDATE SET"
+            " username = CASE WHEN excluded.username <> '' THEN excluded.username ELSE peers.username END,"
+            " name = CASE WHEN excluded.name <> '' THEN excluded.name ELSE peers.name END,"
+            " last_seen = excluded.last_seen",
+            (connection_id, chat_id, peer_username, peer_name, stamp),
+        ),
+        (
+            "INSERT INTO chats (connection_id, chat_id, owner_username, peer_username, peer_name, messages, last_seen)"
+            " VALUES (?, ?, ?, ?, ?, 1, ?)"
+            " ON CONFLICT(connection_id, chat_id) DO UPDATE SET"
+            " owner_username = CASE WHEN excluded.owner_username <> '' THEN excluded.owner_username ELSE chats.owner_username END,"
+            " peer_username = CASE WHEN excluded.peer_username <> '' THEN excluded.peer_username ELSE chats.peer_username END,"
+            " peer_name = CASE WHEN excluded.peer_name <> '' THEN excluded.peer_name ELSE chats.peer_name END,"
+            " messages = chats.messages + 1, last_seen = excluded.last_seen",
+            (connection_id, chat_id, owner_username, peer_username, peer_name, stamp),
+        ),
+        (
+            "INSERT INTO messages (user_id, role, text, ts, connection_id, chat_id, author_id, author_username)"
+            " VALUES (NULL, ?, ?, ?, ?, ?, ?, ?)",
+            (role, text[:4000], stamp, connection_id, chat_id, author_id, author_username[:64]),
+        ),
+    ]
+    with _lock:
+        if _turso is not None:
+            _turso.request(statements)
+        else:
+            conn = connect()
+            for sql, params in statements:
+                conn.execute(sql, params)
+            conn.commit()
+
+
 def add_peer(connection_id: str, chat_id: int, username: str = "", name: str = "") -> None:
     _write(
         "INSERT INTO peers (connection_id, chat_id, username, name, last_seen) VALUES (?, ?, ?, ?, ?)"
