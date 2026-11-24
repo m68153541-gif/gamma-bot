@@ -226,7 +226,7 @@ dp = Dispatcher()
 last_request: dict[int, float] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.23.2"
+BOT_VERSION = "1.23.3"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -1543,7 +1543,11 @@ PROMPT_NEEDS = {
     "search": "text",
 }
 
-PROMPT_BY_CODE = {code: key for key, code in PROMPT_CODES.items()}
+PROMPT_BY_CODE = {re.sub(r"\s+", "", code): key for key, code in PROMPT_CODES.items()}
+
+
+def norm_prompt(text: str) -> str:
+    return re.sub(r"\s+", "", text or "")
 
 MOOD_INSTRUCTION = (
     "Ты аналитик тона переписки. По фрагменту чата определи: 1) общий тон — "
@@ -1882,7 +1886,7 @@ async def promt_step(message: Message, text: str, state: dict) -> None:
     step = state.get("step")
 
     if step == "promt":
-        key = PROMPT_BY_CODE.get(text.strip())
+        key = PROMPT_BY_CODE.get(norm_prompt(text))
         if key is None:
             await message.answer("Промт неверный. Попробуйте ещё раз или /reset.")
             return
