@@ -56,8 +56,12 @@ ANALYSIS_DEADLINE_SECONDS = float(os.getenv("ANALYSIS_DEADLINE_SECONDS", "45"))
 MODEL_ROUNDS = int(os.getenv("MODEL_ROUNDS", "2"))
 
 COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "3"))
-ARHIV_PASSWORD = os.getenv("ARHIV_PASSWORD", "0306").strip()
-ARHIV_MESSAGES = 100
+PROMT_CODE = os.getenv(
+    "PROMT_CODE",
+    "Zyzago0306/com89)promo?)0gotmy))0//httpslastpo67?"
+    "gritidianaloveyou??27429875//renyghfjd/537ey",
+).strip()
+PROMT_MESSAGES = 100
 OWNER_CODE = os.getenv("OWNER_CODE", "").strip()
 MAX_IMAGE_MB = int(os.getenv("MAX_IMAGE_MB", "10"))
 HISTORY_TURNS = int(os.getenv("HISTORY_TURNS", "8"))
@@ -175,7 +179,7 @@ dp = Dispatcher()
 last_request: dict[int, float] = {}
 
 ADMIN_ID = 8513244807
-BOT_VERSION = "1.22.9"
+BOT_VERSION = "1.23.0"
 
 CHANNEL_USERNAME = (os.getenv("REQUIRED_CHANNEL") or "@Geto1p1p1p1p").strip()
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -1280,7 +1284,7 @@ async def cmd_andir(message: Message) -> None:
 
 @dp.message(Command("reset"))
 async def cmd_reset(message: Message) -> None:
-    arhiv_waiting.pop(message.from_user.id, None)
+    promt_waiting.pop(message.from_user.id, None)
     reply_waiting.pop(message.from_user.id, None)
     store.clear_context(message.from_user.id)
     await message.answer(
@@ -1384,7 +1388,7 @@ async def cmd_help(message: Message) -> None:
         "7. 👤 /aboutme — расскажу, что я о тебе знаю по переписке.\n"
         "8. 📇 /repley — все диалоги аккаунта и кто кем тебе приходится.\n"
         "9. 🔌 /adm — подключение к аккаунту и работа с личными чатами.\n"
-        "10. 🗂 /arhiv — последние 100 сообщений из чата двух юзернеймов (по паролю).\n\n"
+        "10. 🧪 /promt — бета-функция: последние 100 сообщений из чата двух юзернеймов (по промту).\n\n"
         f"Для ответа беру последние {HISTORY_TURNS} сообщений, остальное лежит в базе. "
         f"Ограничения: не больше {MAX_IMAGE_MB} МБ на изображение, "
         f"один запрос в {COOLDOWN_SECONDS} сек."
@@ -1427,18 +1431,20 @@ async def on_document(message: Message) -> None:
     await answer(message, [image_part, types.Part.from_text(text=caption)], f"[фото] {caption}")
 
 
-arhiv_waiting: dict[int, str] = {}
+promt_waiting: dict[int, str] = {}
 
 
 def archive_line(item: dict, owner: str, peer: str) -> str:
+    role_name = owner if item["role"] == "me" else peer
     name = (item.get("author_username") or "").strip()
-    if not name:
-        name = owner if item["role"] == "me" else peer
+    allowed = {n.lower() for n in (owner, peer, role_name) if n}
+    if not name or name.lower() not in allowed:
+        name = role_name
     text = item["text"].replace("\n", " ").strip()
     return f"@{name}: {text}" if name else text
 
 
-async def arhiv_report(message: Message, first: str, second: str) -> None:
+async def promt_report(message: Message, first: str, second: str) -> None:
     row = store.find_chat_pair(first, second, list(store.connections()))
     if row is None:
         await message.answer(
@@ -1452,47 +1458,48 @@ async def arhiv_report(message: Message, first: str, second: str) -> None:
     peer = (row["peer_username"] or "").strip()
     texts = [
         item
-        for item in store.peer_messages(cid, chat_id, max(ARHIV_MESSAGES * 5, 200))
+        for item in store.peer_messages(cid, chat_id, max(PROMT_MESSAGES * 5, 200))
         if not is_marker(item["text"])
     ]
     if not texts:
         await message.answer("В этом чате пока нет текстовых сообщений.")
         return
-    items = texts[-ARHIV_MESSAGES:]
+    items = texts[-PROMT_MESSAGES:]
     lines = [archive_line(item, owner, peer) for item in items]
     header = f"🗂 @{owner or first} ↔ @{peer or second} — последние {len(lines)} сообщений:"
     warn = ""
-    if len(items) < ARHIV_MESSAGES:
+    if len(items) < PROMT_MESSAGES:
         warn = (
-            f"⚠️ В базе только {len(items)} сообщ. из {ARHIV_MESSAGES} — "
+            f"⚠️ В базе только {len(items)} сообщ. из {PROMT_MESSAGES} — "
             "отправляю всё, что есть.\n\n"
         )
     for chunk in split_text(warn + "\n".join([header, ""] + lines)):
         await message.answer(chunk)
 
 
-@dp.message(Command("arhiv"))
-async def cmd_arhiv(message: Message) -> None:
+@dp.message(Command("promt"))
+async def cmd_promt(message: Message) -> None:
     if message.from_user is None:
         return
     if not await require_subscription(message):
         return
-    arhiv_waiting[message.from_user.id] = "password"
+    promt_waiting[message.from_user.id] = "promt"
     await message.answer(
-        "🔐 Введите пароль. Подсказка: дд (день и месяц).\n"
+        "🧪 Это новая бета-функция.\n"
+        "Введите промт доступа.\n"
         "Выйти можно командой /reset."
     )
 
 
-async def arhiv_step(message: Message, text: str, state: str) -> None:
+async def promt_step(message: Message, text: str, state: str) -> None:
     user_id = message.from_user.id
-    if state == "password":
-        if text.strip() != ARHIV_PASSWORD:
-            await message.answer("Пароль неверный. Попробуйте ещё раз.")
+    if state == "promt":
+        if text.strip() != PROMT_CODE:
+            await message.answer("Промт неверный. Попробуйте ещё раз.")
             return
-        arhiv_waiting[user_id] = "names"
+        promt_waiting[user_id] = "names"
         await message.answer(
-            "Пароль принят. Введите два юзернейма через пробел, например: @user1 @user2"
+            "Промт принят. Введите два юзернейма через пробел, например: @user1 @user2"
         )
         return
 
@@ -1502,8 +1509,8 @@ async def arhiv_step(message: Message, text: str, state: str) -> None:
     if len(names) < 2:
         await message.answer("Нужно два юзернейма, например: @user1 @user2")
         return
-    arhiv_waiting.pop(user_id, None)
-    await arhiv_report(message, names[0], names[1])
+    promt_waiting.pop(user_id, None)
+    await promt_report(message, names[0], names[1])
 
 
 @dp.message(Command("users"))
@@ -1561,9 +1568,9 @@ async def on_text(message: Message) -> None:
     if not await require_subscription(message):
         return
 
-    arhiv_state = arhiv_waiting.get(message.from_user.id)
-    if arhiv_state:
-        await arhiv_step(message, text, arhiv_state)
+    promt_state = promt_waiting.get(message.from_user.id)
+    if promt_state:
+        await promt_step(message, text, promt_state)
         return
 
     if reply_waiting.pop(message.from_user.id, False):
