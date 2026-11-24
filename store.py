@@ -497,6 +497,17 @@ def find_chat(owner: str, peer: str, connection_ids: list[str] | None = None) ->
     return None
 
 
+def find_chat_pair(first: str, second: str, connection_ids: list[str] | None = None) -> dict | None:
+    a = first.lower()
+    b = second.lower()
+    for row in chats(connection_ids):
+        owner = (row["owner_username"] or "").lower()
+        peer = (row["peer_username"] or "").lower()
+        if (owner == a and peer == b) or (owner == b and peer == a):
+            return row
+    return None
+
+
 def chats_for_peer(peer: str, connection_ids: list[str] | None = None) -> list[dict]:
     peer_low = peer.lower()
     return [r for r in chats(connection_ids) if (r["peer_username"] or "").lower() == peer_low]

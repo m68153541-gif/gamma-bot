@@ -20,7 +20,7 @@ log = logging.getLogger("gamma.sync")
 STATE_BRANCH = os.getenv("DB_BRANCH", "state")
 STATE_NAME = "bot.db.enc"
 SNAPSHOT = Path(os.getenv("DB_SNAPSHOT", f"data/{STATE_NAME}"))
-SYNC_SECONDS = int(os.getenv("DB_SYNC_SECONDS", "30"))
+SYNC_SECONDS = int(os.getenv("DB_SYNC_SECONDS", "15"))
 
 
 def _fernet() -> Fernet | None:
